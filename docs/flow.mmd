@@ -1,0 +1,38 @@
+sequenceDiagram
+  autonumber
+  participant LOG as 日志源
+  participant ING as 采集降噪层
+  participant ORC as 事件编排器
+  participant CLS as 根因分类器
+  participant RET as Repo检索
+  participant LLM as LLM Agent
+  participant KB as 知识库RAG
+  participant OWN as Owner解析
+  participant ML as 邮件/IM
+
+  LOG->>ING: 原始日志流
+  ING->>ING: 指纹聚合+去重+降噪
+  ING->>ING: 规则/小模型预过滤
+  ING->>ORC: 异常事件(去重后)
+
+  ORC->>CLS: 触发根因分析
+  CLS->>CLS: 判定根因类型(代码/数据/配置/依赖/容量)
+
+  alt 代码bug
+    CLS->>RET: 请求相关代码上下文
+    RET->>RET: stack frame 到文件到调用图到依赖图到语义检索
+    RET-->>CLS: 精准代码片段
+    CLS->>KB: 检索相似历史修复
+    KB-->>CLS: 历史案例
+    CLS->>LLM: 两阶段(候选根因到代码验证)
+    LLM-->>CLS: 根因+diff方案+置信度
+  else 非代码bug
+    CLS->>LLM: 上游数据/配置/依赖分析
+    LLM-->>CLS: 根因+建议动作+置信度
+  end
+
+  CLS->>OWN: 根因+方案+作者线索(stack frame/blame)
+  OWN->>OWN: CODEOWNERS到OWNER到blame到README分层解析
+  OWN-->>ORC: 负责人+平台身份
+  ORC->>ML: 通知(根因摘要+方案diff+置信度+日志链接)
+  ML-->>LOG: 闭环 - 负责人反馈回灌知识库
