@@ -1,0 +1,85 @@
+flowchart TB
+  classDef external fill:#1f2937,stroke:#374151,color:#d1d5db
+  classDef ingest fill:#0c2d6b,stroke:#1f6feb,color:#bfdbfe
+  classDef core fill:#3b1d4a,stroke:#a371f7,color:#e9d5ff
+  classDef llm fill:#4a1d1d,stroke:#f85149,color:#fecaca
+  classDef notify fill:#1d4a2e,stroke:#3fb950,color:#bbf7d0
+  classDef store fill:#3b2f1d,stroke:#d29922,color:#fde68a
+
+  subgraph SRC[数据源 - 平台无关]
+    ELK[(ELK / Loki)]
+    SENTRY[(Sentry / 错误上报)]
+    APM[(APM / Traces)]
+    FILE[(日志文件 / Tail)]
+  end
+
+  subgraph INGEST[1. 采集与降噪层]
+    COLLECT[Collector<br/>Filebeat/Fluentd/HTTP Ingest]
+    FP[指纹聚合 Fingerprinting<br/>按 stack+message 归并]
+    DEDUP[去重 + 时间窗降噪]
+    FILTER[规则/小模型预过滤<br/>只放行真异常]
+  end
+
+  subgraph CORE[2. 调度与编排层]
+    QUEUE[(异常事件队列<br/>Kafka/RabbitMQ)]
+    ORCH[事件编排器<br/>限流·优先级·去抖]
+  end
+
+  subgraph RCA[3. LLM 根因分析层]
+    CLS[根因类型分类器<br/>代码bug/数据/配置/依赖/容量]
+    CODEPATH[代码根因分支]
+    NONCODE[非代码根因分支]
+    RETRIEVE[Repo 代码检索<br/>调用图+依赖图+语义索引]
+    LLM1[LLM Agent<br/>两阶段:候选→验证]
+    LLM2[LLM Agent<br/>非代码场景分析]
+    FIX[修改方案生成<br/>unified diff 草稿]
+    CONF[置信度评估]
+  end
+
+  subgraph OWN[4. 定责与方案交付层]
+    BLAME[Owner 解析<br/>CODEOWNERS>OWNER>blame>README]
+    MAP[人名→平台身份映射]
+    PREVIEW[方案预览/通知编排]
+  end
+
+  subgraph OUT[5. 通知渠道]
+    MAIL[邮件<br/>根因+方案+diff]
+    IM[IM/Slack/钉钉]
+  end
+
+  subgraph KB[(知识库)]
+    HIST[(历史 incident + 修复<br/>RAG 向量库)]
+    RUN[(Runbook / 已知问题)]
+  end
+
+  ELK --> COLLECT
+  SENTRY --> COLLECT
+  APM --> COLLECT
+  FILE --> COLLECT
+  COLLECT --> FP --> DEDUP --> FILTER
+  FILTER -->|异常事件| QUEUE
+  QUEUE --> ORCH
+  ORCH --> CLS
+
+  CLS -->|代码bug| CODEPATH
+  CLS -->|非代码| NONCODE
+  CODEPATH --> RETRIEVE --> LLM1 --> FIX
+  NONCODE --> LLM2
+  HIST -.RAG.-> LLM1
+  HIST -.RAG.-> LLM2
+  RUN -.-> LLM2
+  FIX --> CONF
+  LLM2 --> CONF
+
+  CONF --> BLAME --> MAP --> PREVIEW
+  PREVIEW --> MAIL
+  PREVIEW --> IM
+
+  class ELK,SENTRY,APM,FILE external
+  class COLLECT,FP,DEDUP,FILTER ingest
+  class QUEUE,ORCH,CORE core
+  class CLS,CODEPATH,NONCODE,RETRIEVE,FIX,CONF core
+  class LLM1,LLM2 llm
+  class BLAME,MAP,PREVIEW notify
+  class MAIL,IM notify
+  class HIST,RUN,KB store

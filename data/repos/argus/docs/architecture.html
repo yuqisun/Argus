@@ -1,0 +1,1282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Argus — 日志异常智能修复中台 架构设计</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  body { font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; margin: 0; background: #0d1117; color: #c9d1d9; }
+  header { padding: 28px 40px 8px; border-bottom: 1px solid #21262d; }
+  h1 { margin: 0; font-size: 22px; color: #58a6ff; }
+  .sub { color: #8b949e; font-size: 13px; margin-top: 6px; }
+  .tabs { display: flex; gap: 4px; padding: 12px 40px 0; flex-wrap: wrap; }
+  .tab { padding: 8px 16px; background: #161b22; border: 1px solid #21262d; border-bottom: none; border-radius: 6px 6px 0 0; cursor: pointer; font-size: 13px; color: #8b949e; }
+  .tab.active { background: #0d1117; color: #58a6ff; border-color: #30363d; }
+  .panel { display: none; padding: 16px 40px 40px; }
+  .panel.active { display: block; }
+  .mermaid-host { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 24px; overflow: auto; }
+  .mermaid-host svg { max-width: none !important; height: auto !important; }
+  .legend { margin-top: 16px; font-size: 12px; color: #8b949e; line-height: 1.8; }
+  .legend b { color: #c9d1d9; }
+  .note { margin-top: 14px; padding: 12px 16px; background: #161b22; border-left: 3px solid #58a6ff; border-radius: 4px; font-size: 13px; line-height: 1.7; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Argus — 日志异常智能修复中台</h1>
+  <div class="sub">监听日志异常 → LLM 语义级根因分析（区分代码/非代码）→ 找最懂代码的人 → 根因+修改方案通知 · 架构设计 v1（PR 自动化后置）</div>
+</header>
+
+<div class="tabs">
+  <div class="tab active" onclick="show('overview')">总体架构</div>
+  <div class="tab" onclick="show('flow')">核心数据流</div>
+  <div class="tab" onclick="show('rca')">根因分析内部</div>
+  <div class="tab" onclick="show('owner')">定责与通知</div>
+  <div class="tab" onclick="show('ingest')">采集与降噪</div>
+  <div class="tab" onclick="show('orch')">调度与编排</div>
+  <div class="tab" onclick="show('rca2')">LLM根因分析</div>
+  <div class="tab" onclick="show('deploy')">部署架构</div>
+  <div class="tab" onclick="show('storage')">数据存储</div>
+  <div class="tab" onclick="show('security')">安全脱敏</div>
+  <div class="tab" onclick="show('observ')">可观测性</div>
+  <div class="tab" onclick="show('llmmgmt')">LLM调用管理</div>
+  <div class="tab" onclick="show('onboard')">接入流程</div>
+</div>
+
+<!-- ==================== 总体架构 ==================== -->
+<div id="overview" class="panel active">
+<div class="mermaid-host" id="host-overview"></div>
+<script type="text/mermaid" id="src-overview">
+flowchart TB
+  classDef ext fill:#1f2937,stroke:#374151,color:#d1d5db
+  classDef ing fill:#0c2d6b,stroke:#1f6feb,color:#bfdbfe
+  classDef cor fill:#3b1d4a,stroke:#a371f7,color:#e9d5ff
+  classDef lmm fill:#4a1d1d,stroke:#f85149,color:#fecaca
+  classDef not fill:#1d4a2e,stroke:#3fb950,color:#bbf7d0
+  classDef st fill:#3b2f1d,stroke:#d29922,color:#fde68a
+
+  subgraph SRC["数据源 - 平台无关"]
+    ELK["ELK / Loki"]
+    SEN["Sentry / 错误上报"]
+    APM["APM / Traces"]
+    FL["日志文件 / Tail"]
+  end
+
+  subgraph INGEST["1. 采集与降噪层"]
+    COL["Collector - Filebeat/Fluentd/HTTP"]
+    FP["指纹聚合 Fingerprinting - 按 stack+message 归并"]
+    DED["去重 + 时间窗降噪"]
+    FILT["规则/小模型预过滤 - 只放行真异常"]
+  end
+
+  subgraph CORE["2. 调度与编排层"]
+    QUE["异常事件队列 - Kafka/RabbitMQ"]
+    ORCH["事件编排器 - 限流/优先级/去抖"]
+  end
+
+  subgraph RCA["3. LLM 根因分析层"]
+    CLS["根因类型分类器 - 代码bug/数据/配置/依赖/容量"]
+    CP["代码根因分支"]
+    NC["非代码根因分支"]
+    RET["Repo 代码检索 - grep精确 + codegraph结构 + 向量语义(可选) + 历史RAG(可选)"]
+    L1["LLM Agent - 两阶段:候选到验证"]
+    L2["LLM Agent - 非代码场景分析"]
+    FIX["修改方案生成 - unified diff 草稿"]
+    CNF["置信度评估"]
+  end
+
+  subgraph OWN["4. 定责与方案交付层"]
+    BLM["Owner 解析 - CODEOWNERS 到 OWNER 到 blame 到 README"]
+    MAP["人名到平台身份映射"]
+    PREV["方案预览/通知编排"]
+  end
+
+  subgraph OUT["5. 通知渠道"]
+    MAIL["邮件 - 根因+方案+diff"]
+    IM["IM/Slack/钉钉"]
+  end
+
+  subgraph KB["知识库 (可选)"]
+    HIST["历史 incident + 修复 - RAG 向量库 (可选)"]
+    RUN["Runbook / 已知问题"]
+  end
+
+  ELK --> COL
+  SEN --> COL
+  APM --> COL
+  FL --> COL
+  COL --> FP
+  FP --> DED
+  DED --> FILT
+  FILT -->|"异常事件"| QUE
+  QUE --> ORCH
+  ORCH --> CLS
+
+  CLS -->|"代码bug"| CP
+  CLS -->|"非代码"| NC
+  CP --> RET
+  RET --> L1
+  L1 --> FIX
+  NC --> L2
+  NC -.->|"交叉验证"| RET
+  HIST -.->|"RAG"| L1
+  HIST -.->|"RAG"| L2
+  RUN -.-> L2
+  FIX --> CNF
+  L2 --> CNF
+
+  CNF --> BLM
+  BLM --> MAP
+  MAP --> PREV
+  PREV --> MAIL
+  PREV --> IM
+
+  class ELK,SEN,APM,FL ext
+  class COL,FP,DED,FILT ing
+  class QUE,ORCH cor
+  class CLS,CP,NC,RET,FIX,CNF cor
+  class L1,L2 lmm
+  class BLM,MAP,PREV not
+  class MAIL,IM not
+  class HIST,RUN st
+</script>
+<div class="legend">
+  <b>图例</b>：蓝色=采集降噪 · 紫色=编排与分类 · 红色=LLM 推理 · 绿色=定责与通知 · 黄色=知识存储 · 灰色=外部数据源<br/>
+  <b>核心闭环</b>：日志源 → 降噪 → 编排 → 根因分类 → (代码/非代码分支) → 方案+置信度 → 找最懂的人 → 邮件/IM 通知<br/>
+  <b>本版不含</b>：PR 自动化（后置）、SCM Provider 双平台适配（后置）
+</div>
+</div>
+
+<!-- ==================== 核心数据流 ==================== -->
+<div id="flow" class="panel">
+<div class="mermaid-host" id="host-flow"></div>
+<script type="text/mermaid" id="src-flow">
+sequenceDiagram
+  autonumber
+  participant LOG as 日志源
+  participant ING as 采集降噪层
+  participant ORC as 事件编排器
+  participant CLS as 根因分类器
+  participant RET as Repo检索
+  participant LLM as LLM Agent
+  participant KB as 知识库RAG(可选)
+  participant OWN as Owner解析
+  participant ML as 邮件/IM
+
+  LOG->>ING: 原始日志流
+  ING->>ING: 指纹聚合+去重+降噪
+  ING->>ING: 规则/小模型预过滤
+  ING->>ORC: 异常事件(去重后)
+
+  ORC->>CLS: 触发根因分析
+  CLS->>CLS: 判定根因类型(代码/数据/配置/依赖/容量)
+
+  alt 代码bug
+    CLS->>RET: 请求相关代码上下文
+    RET->>RET: stack frame 到文件到调用图到依赖图到语义检索
+    RET-->>CLS: 精准代码片段
+    CLS->>KB: 检索相似历史修复
+    KB-->>CLS: 历史案例
+    CLS->>LLM: 两阶段(候选根因到代码验证)
+    LLM-->>CLS: 根因+diff方案+置信度
+  else 非代码bug
+    CLS->>LLM: 上游数据/配置/依赖分析
+    LLM-->>CLS: 根因+建议动作+置信度
+  end
+
+  CLS->>OWN: 根因+方案+作者线索(stack frame/blame)
+  OWN->>OWN: CODEOWNERS到OWNER到blame到README分层解析
+  OWN-->>ORC: 负责人+平台身份
+  ORC->>ML: 通知(根因摘要+方案diff+置信度+日志链接)
+  ML-->>LOG: 闭环 - 负责人反馈回灌知识库
+</script>
+<div class="note">
+  <b>关键时序点</b>：<br/>
+  1. 降噪在 LLM 之前，避免成本爆炸与噪音。<br/>
+  2. 根因类型先分类，代码 bug 才进 repo 检索，非代码走轻量分析。<br/>
+  3. 两阶段 LLM（候选到验证）显著提升根因准确率，对冲 OpenRCA 指出的难点。<br/>
+  4. 置信度贯穿全程，低置信走"辅助 triage"而非自动定责。<br/>
+  5. 反馈闭环：负责人对根因/方案的评价回灌 RAG 知识库，持续提升。
+</div>
+</div>
+
+<!-- ==================== 根因分析内部 ==================== -->
+<div id="rca" class="panel">
+<div class="mermaid-host" id="host-rca"></div>
+<script type="text/mermaid" id="src-rca">
+flowchart LR
+  classDef start fill:#0c2d6b,stroke:#1f6feb,color:#bfdbfe
+  classDef dec fill:#3b1d4a,stroke:#a371f7,color:#e9d5ff
+  classDef lmm fill:#4a1d1d,stroke:#f85149,color:#fecaca
+  classDef cod fill:#1d4a2e,stroke:#3fb950,color:#bbf7d0
+  classDef out fill:#3b2f1d,stroke:#d29922,color:#fde68a
+  classDef shared fill:#1a3a4a,stroke:#2f81f7,color:#a5d6ff
+
+  EVT["异常事件"] --> CLS{"根因类型分类器"}
+
+  CLS -->|"代码bug"| STK["提取 stack frame - 文件:行号"]
+  STK --> GRP["构建上下文 - 调用图+依赖图"]
+  GRP --> SEM["语义检索 - 相关函数/类"]
+  SEM --> CND["LLM 阶段1 - 生成候选根因"]
+  CND --> VRF["LLM 阶段2 - 用代码验证/否决"]
+  VRF --> DIF["生成修改方案 - unified diff"]
+  DIF --> SC1{"置信度达标?"}
+
+  CLS -->|"上游数据"| DTA["数据校验 - schema/范围/缺失"]
+  CLS -->|"配置变更"| CFG["配置 diff - 近期变更对比"]
+  CLS -->|"依赖故障"| DEP["依赖健康 - 下游服务状态"]
+  CLS -->|"缺文件/资源"| MIS["文件存在性+路径引用检查"]
+  CLS -->|"容量/流量"| CAP["指标基线 - 异常突增检测"]
+
+  DTA -.->|"交叉验证"| RCS
+  CFG -.->|"交叉验证"| RCS
+  DEP -.->|"交叉验证"| RCS
+  MIS -.->|"交叉验证"| RCS
+
+  RCS["共享 Repo 检索<br/>grep精确 + codegraph结构<br/>向量语义(可选) + 历史案例RAG(可选)<br/>agent自主多轮检索"]
+
+  DTA --> SC2{"置信度达标?"}
+  CFG --> SC2
+  DEP --> SC2
+  MIS --> SC2
+  CAP --> SC2
+
+  SC1 -->|"是"| AUTO["自动定责+带方案通知"]
+  SC1 -->|"否"| AST["辅助triage - 给候选+人选,人工判定"]
+  SC2 -->|"是"| AUTO
+  SC2 -->|"否"| AST
+
+  AUTO --> OUT["通知负责人"]
+  AST --> OUT
+
+  class EVT start
+  class CLS,SC1,SC2 dec
+  class CND,VRF,DIF lmm
+  class STK,GRP,SEM,DTA,CFG,DEP,MIS,CAP cod
+  class RCS shared
+  class AUTO,AST,OUT out
+</script>
+<div class="legend">
+  <b>共享 Repo 检索</b>：多手段配合。grep精确检索(主力) + codegraph结构检索(关键-调用图/依赖图/数据流)是核心; 向量语义检索和历史案例RAG是<b>可选增强</b>, 无向量库也能运行(grep+codegraph足够定位根因), 有则锦上添花(模糊匹配+历史对照)。agent 自主决定用哪种手段。<br/>
+  <b>新增"缺文件/资源"分支</b>：先查代码中的路径引用/资源加载点，确认该文件是外部依赖还是应内置，再判定是外部文件缺失还是代码缺失。<br/>
+  <b>两阶段 LLM</b>：阶段1 生成候选根因，阶段2 用实际代码上下文验证/否决，避免单轮"瞎猜"。<br/>
+  <b>置信度分流</b>：高置信自动定责+带方案；低置信退化为辅助 triage（给候选+人选，让人判定），保护信任。
+</div>
+</div>
+
+<!-- ==================== 定责与通知 ==================== -->
+<div id="owner" class="panel">
+<div class="mermaid-host" id="host-owner"></div>
+<script type="text/mermaid" id="src-owner">
+flowchart TB
+  classDef inp fill:#0c2d6b,stroke:#1f6feb,color:#bfdbfe
+  classDef lyr fill:#1d4a2e,stroke:#3fb950,color:#bbf7d0
+  classDef bld fill:#0c2d6b,stroke:#1f6feb,color:#bfdbfe
+  classDef orch fill:#3b1d4a,stroke:#a371f7,color:#e9d5ff
+  classDef snd fill:#3b2f1d,stroke:#d29922,color:#fde68a
+  classDef fb fill:#1a3a4a,stroke:#2f81f7,color:#a5d6ff
+  classDef kb fill:#3b2f1d,stroke:#d29922,color:#fde68a
+
+  subgraph INP["定责输入"]
+    SF["stack frame - 文件:行号"]
+    REPO["repo 信息"]
+    ANA["根因+方案+置信度<br/>来自分析层"]
+  end
+
+  subgraph LAD["Owner 解析分层 - 逐级 fallback"]
+    L1["1. CODEOWNERS - 按文件路径精确匹配<br/>团队主动维护, PR强制review保证时效"]
+    L2["2. OWNER 文件 - 目录级半结构化<br/>可加emergency/oncall等元信息"]
+    L3["3. commit blame - 出错方法主要贡献者<br/>非最后一行作者, 避免重构/twisty误判"]
+    L4["4. README/模块文档 - LLM读取兜底<br/>或读service.yml的owner字段"]
+    L1 -.->|"miss"| L2
+    L2 -.->|"miss"| L3
+    L3 -.->|"miss"| L4
+  end
+
+  PMAP["人名到平台身份映射<br/>邮箱作统一主键<br/>GitHub username / ADO uniqueName"]
+
+  subgraph BLD["通知内容构建 - 四要素"]
+    ROOT["根因摘要<br/>出错位置+代码片段+为什么错+根因类型"]
+    PATCH["修改方案<br/>代码bug: unified diff草稿<br/>非代码: 建议动作(修数据/回滚/扩容)<br/>高置信给patch, 低置信给候选方向"]
+    EVID["证据链<br/>完整stack+关键变量值+调用链上下文<br/>+相似历史incident链接"]
+    CNF["置信度+备选<br/>高/中/低 + 依据 + 多候选可能性"]
+  end
+
+  subgraph ORCH2["通知编排"]
+    DEDUP["去重<br/>同一负责人短时多异常合并一封"]
+    ESC["升级<br/>高优N分钟未响应升级到oncall/组长"]
+    SILENT["静默时段<br/>非紧急不在凌晨发, 攒到工作时间"]
+    FREQ["频率控制<br/>每人每日上限, 超了聚合发摘要"]
+  end
+
+  subgraph SND["通知渠道"]
+    MAIL["邮件 - 主渠道, 完整四要素<br/>diff渲染成可读绿红行<br/>主题带置信度+需处理标记"]
+    IMN["IM/Slack/钉钉 - 摘要+深链<br/>可@负责人, 紧急快速触达"]
+  end
+
+  subgraph FBL["反馈闭环"]
+    FBTYPE{"反馈类型"}
+    FB1["根因准确/不准"]
+    FB2["方案可用/需改/采纳/改后采纳"]
+    FB3["找错人了"]
+    FB4["已知问题不用分析"]
+    USE1["优化模型<br/>采纳=强正信号, 根因错=负信号"]
+    USE2["更新owner映射<br/>CODEOWNERS或内部表"]
+    USE3["加入白名单<br/>降噪层不再分析"]
+    USE4["存入知识库(可选)<br/>下次相似异常可对照"]
+  end
+
+  KB[("知识库<br/>历史incident+修复+反馈")]
+
+  SF --> L1
+  REPO --> L1
+  L4 --> WHO["负责人+平台身份+来源标记"]
+  WHO --> PMAP
+  PMAP --> ROOT
+  PMAP --> PATCH
+  ANA --> PATCH
+  ANA --> CNF
+  PMAP --> EVID
+
+  ROOT --> DEDUP
+  PATCH --> DEDUP
+  EVID --> DEDUP
+  CNF --> DEDUP
+  DEDUP --> SILENT
+  SILENT --> FREQ
+  FREQ --> MAIL
+  FREQ --> IMN
+  ESC -.->|"超时未响应"| MAIL
+  ESC -.->|"超时未响应"| IMN
+
+  MAIL --> FBTYPE
+  IMN --> FBTYPE
+  FBTYPE --> FB1
+  FBTYPE --> FB2
+  FBTYPE --> FB3
+  FBTYPE --> FB4
+  FB1 --> USE1
+  FB2 --> USE1
+  FB3 --> USE2
+  FB4 --> USE3
+  FB1 -.->|"存案例"| USE4
+  FB2 -.->|"存案例"| USE4
+  USE1 -.-> KB
+  USE4 -.-> KB
+  KB -.->|"下次分析对照"| PATCH
+
+  class SF,REPO,ANA inp
+  class L1,L2,L3,L4,WHO,PMAP lyr
+  class ROOT,PATCH,EVID,CNF bld
+  class DEDUP,ESC,SILENT,FREQ orch
+  class MAIL,IMN snd
+  class FBTYPE,FB1,FB2,FB3,FB4,USE1,USE2,USE3,USE4 fb
+  class KB kb
+</script>
+<div class="legend">
+  <b>核心定位</b>: 把分析结果变成"给最懂代码的人的一份可执行修复请求"。产品姿态是"修复助手"不是"问责工具",团队接受度天差地别。<br/>
+  <b>Owner 四级 fallback</b>: CODEOWNERS(精确,团队维护) 到 OWNER文件(半结构化) 到 commit blame(出错方法主要贡献者,非最后一行作者) 到 README(LLM读兜底)。逐级 fallback 保证总能找到人。输出含来源标记("为什么找你")。<br/>
+  <b>blame 改进</b>: 不取出错行最后作者(可能只改了typo),取出错方法/类的主要贡献者。避免大重构自动修改导致的误判。<br/>
+  <b>多平台身份映射</b>: 邮箱作统一主键, GitHub username / ADO uniqueName 各自映射, 跨平台找到同一个人。<br/>
+  <b>通知四要素</b>: 根因摘要(位置+代码+为什么+类型) + 修改方案(代码bug给diff/非代码给建议动作) + 证据链(stack+变量+调用链+历史) + 置信度(高/中/低+依据)。让他收到能立即行动。<br/>
+  <b>通知编排</b>: 去重(同人短时合并) + 升级(高优N分钟未响应升oncall) + 静默时段(非紧急不凌晨发) + 频率控制(每人每日上限,超了聚合)。避免轰炸。<br/>
+  <b>反馈闭环(飞轮)</b>: 四类反馈 - 根因准不准/方案能不能用/找错人没/已知问题。用途: 优化模型(采纳=强正信号) + 更新owner映射 + 加白名单 + 存知识库(可选RAG)。系统越用越准。<br/>
+  <b>方案是起点非终点</b>: 他最熟, 给起点比从零排查快。可改后采纳或否决自己修。反馈"改后采纳"是强优化信号。
+</div>
+</div>
+
+<!-- ==================== 采集与降噪 ==================== -->
+<div id="ingest" class="panel">
+<div class="mermaid-host" id="host-ingest"></div>
+<script type="text/mermaid" id="src-ingest">
+flowchart TB
+  classDef src fill:#1f2937,stroke:#374151,color:#d1d5db
+  classDef col fill:#0c2d6b,stroke:#1f6feb,color:#bfdbfe
+  classDef fp fill:#3b1d4a,stroke:#a371f7,color:#e9d5ff
+  classDef ded fill:#1a3a4a,stroke:#2f81f7,color:#a5d6ff
+  classDef fil fill:#3b2f1d,stroke:#d29922,color:#fde68a
+  classDef out fill:#1d4a2e,stroke:#3fb950,color:#bbf7d0
+  classDef drop fill:#4a1d1d,stroke:#f85149,color:#fecaca
+
+  subgraph S1["日志来源"]
+    ELK["ELK / Loki<br/>订阅 ES query / Loki tail"]
+    SEN["Sentry webhook<br/>error event 推送"]
+    APM["APM error span<br/>status=ERROR"]
+    TAIL["日志文件 Tail<br/>Filebeat / Fluentd"]
+  end
+
+  subgraph S2["第1步 Collector 采集"]
+    INGEST["接收 + 格式统一<br/>统一 schema: source/ts/raw/stack/service/host/env"]
+    ML["多行聚合<br/>堆栈起始行 + 连续 at/Caused by 行"]
+    LVL["级别过滤<br/>可配置: 默认 ERROR 及以上<br/>支持按服务/环境单独配置阈值"]
+  end
+
+  subgraph S3["第2步 指纹聚合 Fingerprinting"]
+    NORM["归一化<br/>数字/UUID/路径动态段替换为占位符<br/>/users/12345 - /users/id"]
+    TMPL["message 模板化<br/>Connection refused to 10.0.0.5:6379<br/>- Connection refused to host:port"]
+    HASH["stack top-N 帧 + 异常类型 + message模板<br/>hash - fingerprint"]
+    GROUP["同 fingerprint 归组<br/>保留: 最早样本+最近样本+count+host列表"]
+  end
+
+  subgraph S4["第3步 去重 + 时间窗降噪"]
+    FIRST{"首次出现?"}
+    WIN["窗口内重复<br/>5分钟内只放第一条,累加count"]
+    COOL["静默期 cooldown<br/>1小时内不重新分析"]
+    UPG{"特征升级?<br/>host数突增/堆栈变深"}
+    SUP["发汇总更新<br/>count+影响范围,不重新分析"]
+  end
+
+  subgraph S5["第4步 规则/小模型预过滤"]
+    WL{"已知白名单?<br/>已分析过/负责人标记忽略"}
+    RULE{"规则匹配?<br/>SocketTimeout+下游告警=依赖故障<br/>OOMKilled=容量问题"}
+    SM{"小模型分类器<br/>纯基础设施类? 磁盘满/网络断/证书过期"}
+  end
+
+  EVT["触发事件<br/>送下游 LLM 根因分析"]
+  NONCODE["直接分流非代码分支<br/>跳过 repo 分析"]
+  DROP["丢弃/归档<br/>可回查审计"]
+
+  ELK --> INGEST
+  SEN --> INGEST
+  APM --> INGEST
+  TAIL --> INGEST
+  INGEST --> ML
+  ML --> LVL
+  LVL --> NORM
+
+  NORM --> TMPL
+  TMPL --> HASH
+  HASH --> GROUP
+
+  GROUP --> FIRST
+  FIRST -->|"是"| WIN
+  FIRST -->|"否"| COOL
+  COOL --> UPG
+  UPG -->|"否"| SUP
+  UPG -->|"是,升级"| WL
+  WIN --> WL
+
+  WL -->|"是"| DROP
+  WL -->|"否"| RULE
+  RULE -->|"是,非代码"| NONCODE
+  RULE -->|"否"| SM
+  SM -->|"是,基础设施"| NONCODE
+  SM -->|"否,需深度分析"| EVT
+
+  SUP -.->|"汇总通知"| EVT
+
+  class ELK,SEN,APM,TAIL src
+  class INGEST,ML,LVL col
+  class NORM,TMPL,HASH,GROUP fp
+  class FIRST,WIN,COOL,UPG,SUP ded
+  class WL,RULE,SM fil
+  class EVT out
+  class NONCODE out
+  class DROP drop
+</script>
+<div class="legend">
+  <b>成本漏斗</b>：原始日志 10万条/分 - 多行聚合 - ERROR过滤 - 指纹聚合 - 时间窗去重 - 预过滤 - 进 LLM 仅 2-3 个/分。这一层做不好,整个系统因成本和噪音无法落地。<br/>
+  <b>级别过滤可配置</b>：默认 ERROR 及以上,但支持按服务/环境单独配置。有些团队业务异常打 WARN,有些服务 FATAL 才需关注,不能一刀切。配置项: 全局默认阈值 + 按服务覆盖 + 按环境覆盖(如 prod 比 staging 更宽松)。<br/>
+  <b>指纹算法</b>：不能 hash 整条日志(时间戳/host不同)。取 stack top-N 帧 + 异常类型 + message 模板,归一化动态段后 hash。偏粗会漏,偏细会炸,建议保守上线靠反馈调。<br/>
+  <b>升级检测</b>：静默期内若 host 数突增或堆栈变深,视为升级,突破 cooldown 重新触发分析。<br/>
+  <b>预过滤三分流</b>：白名单丢弃、规则/小模型判定非代码的直接分流、拿不准的才送 LLM。<br/>
+  <b>保留原始样本</b>：聚合后仍保留 1-2 条完整原始日志供 LLM 引用,否则 LLM 拿不到细节。<br/>
+  <b>可回放</b>：被过滤的异常可事后回查,避免过滤太狠漏真 bug 无法追溯。
+</div>
+</div>
+
+<!-- ==================== 调度与编排 ==================== -->
+<div id="orch" class="panel">
+<div class="mermaid-host" id="host-orch"></div>
+<script type="text/mermaid" id="src-orch">
+flowchart TB
+  classDef in fill:#0c2d6b,stroke:#1f6feb,color:#bfdbfe
+  classDef pri fill:#3b1d4a,stroke:#a371f7,color:#e9d5ff
+  classDef que fill:#1a3a4a,stroke:#2f81f7,color:#a5d6ff
+  classDef ctrl fill:#3b2f1d,stroke:#d29922,color:#fde68a
+  classDef deg fill:#4a1d1d,stroke:#f85149,color:#fecaca
+  classDef out fill:#1d4a2e,stroke:#3fb950,color:#bbf7d0
+  classDef err fill:#4a1d1d,stroke:#f85149,color:#fecaca
+
+  EVT["触发事件<br/>来自降噪层"]
+
+  subgraph P1["优先级计算"]
+    SCOPE["影响范围<br/>host数/服务数/核心链路"]
+    SEV["严重度<br/>FATAL大于ERROR/5xx/请求失败"]
+    TREND["频率趋势<br/>count增速"]
+    BIZ["业务影响<br/>关键路径/高峰时段"]
+    FRESH["新鲜度<br/>新fingerprint优先"]
+    SCORE["加权打分<br/>P0/P1/P2/P3"]
+    SCOPE --> SCORE
+    SEV --> SCORE
+    TREND --> SCORE
+    BIZ --> SCORE
+    FRESH --> SCORE
+  end
+
+  subgraph Q["优先级分队列"]
+    Q0["P0 紧急<br/>核心链路+大范围+飙升"]
+    Q1["P1 高<br/>影响明显范围有限"]
+    Q2["P2 常规<br/>偶发/边界/非核心"]
+    Q3["P3 低<br/>已知模式/低频/低影响"]
+  end
+
+  DEB{"去抖 Debounce<br/>同源聚批?<br/>发布窗口/同服务短时多异常"}
+  SKIP{"P0?<br/>P0跳过去抖立即分析"}
+  RL["限流 Rate Limiting<br/>全局并发+QPS+token预算<br/>按优先级分配配额 P0占六成 P1三成 P2一成"]
+  DGR{"降级判定<br/>资源紧张?"}
+
+  subgraph DEG["降级阶梯"]
+    NORM["正常<br/>全量LLM两阶段+repo检索+方案生成"]
+    LITE["轻度降级<br/>P3走规则, P2单阶段"]
+    MID["中度降级<br/>P2/P3暂停, repo检索范围缩小"]
+    HEAVY["重度降级<br/>仅小模型分类+通知, 标注AI不可用"]
+    CIR["熔断<br/>LLM连续失败, 暂停调用, 全走重度降级"]
+    NORM --> LITE --> MID --> HEAVY --> CIR
+  end
+
+  ANALYZE["送下游 LLM 根因分析"]
+  NOTIFY["通知负责人(无AI分析)<br/>附日志+stack+找人"]
+
+  subgraph RT["重试与死信"]
+    RETRY{"可重试?<br/>超时/拉不到repo"}
+    BACK["指数退避重试<br/>最多N次"]
+    DLQ["死信队列 DLQ<br/>不可重试/格式错误<br/>人工介入"]
+    PART["部分成功<br/>根因有/方案失败 - 根因仍通知"]
+  end
+
+  EVT --> SCORE
+  SCORE --> Q0
+  SCORE --> Q1
+  SCORE --> Q2
+  SCORE --> Q3
+
+  Q0 --> SKIP
+  Q1 --> DEB
+  Q2 --> DEB
+  Q3 --> DEB
+  SKIP -->|"是,跳过"| RL
+  DEB -->|"聚批完成"| RL
+  DEB -.->|"P0升级突破去抖"| SKIP
+
+  RL --> DGR
+  DGR -->|"正常"| NORM
+  DGR -->|"轻度紧张"| LITE
+  DGR -->|"中度紧张"| MID
+  DGR -->|"重度紧张"| HEAVY
+  DGR -.->|"LLM连续失败"| CIR
+
+  NORM --> ANALYZE
+  LITE --> ANALYZE
+  MID --> ANALYZE
+  HEAVY --> NOTIFY
+  CIR --> NOTIFY
+
+  ANALYZE --> RETRY
+  RETRY -->|"是"| BACK
+  BACK --> ANALYZE
+  RETRY -->|"否"| DLQ
+  ANALYZE --> PART
+
+  class EVT in
+  class SCOPE,SEV,TREND,BIZ,FRESH,SCORE pri
+  class Q0,Q1,Q2,Q3 que
+  class DEB,SKIP,RL,DGR ctrl
+  class NORM,LITE,MID,HEAVY,CIR deg
+  class ANALYZE,NOTIFY out
+  class RETRY,BACK,DLQ,PART err
+</script>
+<div class="legend">
+  <b>核心职责</b>:让重要异常优先分析,不重要延后或降级,LLM调用始终在可控预算内。无此层,洪峰时要么烧爆预算、要么雪崩卡死、要么关键事故被低优事件淹没。<br/>
+  <b>优先级信号</b>:影响范围+严重度+频率趋势+业务影响+新鲜度,加权打分分 P0-P3 四级。事件在队列等待时若影响扩大,优先级动态上调。<br/>
+  <b>去抖 vs 降噪去重</b>:降噪层去重基于 fingerprint 相同;编排层去抖针对同一根因的不同表象(发布 regression 触发多个不同 fingerprint),聚批后一次分析。P0 跳过去抖立即分析。<br/>
+  <b>限流三维度</b>:全局并发+QPS+token预算,按优先级分配配额。P0 占六成并发保证关键事故不被挤占。<br/>
+  <b>降级关键原则</b>:通知不能断。即使 LLM 挂了,至少把"有异常+找到的人+原始日志"通知出去让人工接手。分析能力可降级,告警能力必须高可用。<br/>
+  <b>部分成功</b>:根因分析成功但方案生成失败,根因仍通知,不浪费已有分析成果。<br/>
+  <b>熔断</b>:LLM 连续失败超阈值触发熔断,暂停调用一段时间,避免雪崩。
+</div>
+</div>
+
+<!-- ==================== LLM 根因分析 ==================== -->
+<div id="rca2" class="panel">
+<div class="mermaid-host" id="host-rca2"></div>
+<script type="text/mermaid" id="src-rca2">
+flowchart TB
+  classDef in fill:#0c2d6b,stroke:#1f6feb,color:#bfdbfe
+  classDef cls fill:#3b1d4a,stroke:#a371f7,color:#e9d5ff
+  classDef code fill:#1d4a2e,stroke:#3fb950,color:#bbf7d0
+  classDef llm fill:#4a1d1d,stroke:#f85149,color:#fecaca
+  classDef non fill:#3b2f1d,stroke:#d29922,color:#fde68a
+  classDef ret fill:#1a3a4a,stroke:#2f81f7,color:#a5d6ff
+  classDef conf fill:#3b1d4a,stroke:#a371f7,color:#e9d5ff
+  classDef out fill:#1d4a2e,stroke:#3fb950,color:#bbf7d0
+  classDef kb fill:#3b2f1d,stroke:#d29922,color:#fde68a
+
+  EVT["异常事件<br/>来自编排层"]
+
+  subgraph CLSS["第1步 根因类型分类器"]
+    RULE{"规则/小模型粗筛<br/>SocketTimeout+下游告警=依赖故障<br/>OOMKilled=容量<br/>磁盘满/网络断=基础设施"}
+    LLMCLS["LLM精判<br/>看异常类型+message+stack top帧<br/>只分类不分析, prompt短快"]
+    TYPE{"根因类型?"}
+    RULE -->|"覆盖不了"| LLMCLS
+    LLMCLS --> TYPE
+  end
+
+  subgraph CODE["第2步 代码根因分支(核心路径)"]
+    STK["提取 stack frame top-N帧<br/>文件:行号:方法名<br/>用release对应commit版本的代码"]
+    RET1["agent自主检索(多轮迭代)"]
+    CAND["LLM阶段1 生成候选根因<br/>2-3个候选, 每个含定位+假设+依据"]
+    VRF["LLM阶段2 代码验证/否决<br/>强制回到代码核对每个假设"]
+    ROOT["确定根因<br/>定位到文件:行号"]
+    DIFF["生成修改方案<br/>unified diff草稿"]
+    STK --> RET1
+    RET1 --> CAND
+    CAND --> VRF
+    VRF -->|"验证通过"| ROOT
+    VRF -.->|"全部否决"| LOW["低置信-上下文不足"]
+    ROOT --> DIFF
+  end
+
+  subgraph NONC["第3步 非代码根因分支(差异化路径)"]
+    NCCLS{"非代码类型?"}
+    DATA["上游数据异常<br/>schema/字段缺失/值域越界<br/>+查代码: 数据假设是否合理"]
+    CFG["配置变更<br/>配置diff近期变更<br/>+查代码: 读取点是否正确处理新值"]
+    DEP["依赖故障<br/>下游健康/RT/错误率<br/>+查代码: 有无重试熔断降级"]
+    MIS["缺文件/资源<br/>文件存在性检查<br/>+查代码: 路径硬编码还是配置"]
+    CAP["容量/流量<br/>CPU/内存/连接数/QPS基线<br/>通常不查代码"]
+    NCCLS --> DATA
+    NCCLS --> CFG
+    NCCLS --> DEP
+    NCCLS --> MIS
+    NCCLS --> CAP
+  end
+
+  subgraph RETR["agent自主检索工具集"]
+    GRP["grep精确<br/>符号/引用/字面量"]
+    CG["codegraph结构<br/>调用图/依赖图/数据流"]
+    VEC["向量语义(可选)<br/>模糊匹配探索"]
+    HIST["历史案例RAG(可选)<br/>相似incident修复"]
+  end
+
+  KB[("知识库<br/>历史incident+修复+反馈")]
+
+  subgraph CONF4["第4步 置信度分流"]
+    SCORE{"置信度评估<br/>LLM自评+启发式信号<br/>根因是否在stack top帧<br/>是否匹配历史模式"}
+    HI["高置信<br/>自动定责+带方案"]
+    MID["中置信<br/>辅助triage给候选+人选"]
+    LO["低置信<br/>仅通知,标注AI未定位<br/>宁可不说也不乱说"]
+  end
+
+  EVT --> RULE
+  RULE -->|"明确非代码"| TYPE
+  TYPE -->|"代码bug"| STK
+  TYPE -->|"非代码"| NCCLS
+
+  RET1 -.->|"调用"| GRP
+  RET1 -.->|"调用"| CG
+  RET1 -.->|"调用"| VEC
+  DATA -.->|"交叉验证"| GRP
+  CFG -.->|"交叉验证"| GRP
+  DEP -.->|"交叉验证"| GRP
+  MIS -.->|"交叉验证"| CG
+
+  KB -.->|"RAG"| CAND
+  KB -.->|"RAG"| DIFF
+  KB -.->|"RAG"| HIST
+  HIST -.->|"检索"| DATA
+
+  DIFF --> SCORE
+  DATA --> SCORE
+  CFG --> SCORE
+  DEP --> SCORE
+  MIS --> SCORE
+  CAP --> SCORE
+  LOW --> LO
+
+  SCORE -->|"高"| HI
+  SCORE -->|"中"| MID
+  SCORE -->|"低"| LO
+
+  HI --> OUT["送定责与通知层"]
+  MID --> OUT
+  LO --> OUT
+
+  class EVT in
+  class RULE,LLMCLS,TYPE,SCORE cls
+  class STK,RET1,CAND,VRF,ROOT,DIFF code
+  class LOW conf
+  class NCCLS,DATA,CFG,DEP,MIS,CAP non
+  class GRP,CG,VEC,HIST ret
+  class KB kb
+  class HI,MID,LO,OUT out
+</script>
+<div class="legend">
+  <b>核心挑战</b>: OpenRCA(ICLR2025)证明LLM定位代码根因准确率仍低。这层设计核心不是"能不能用LLM",而是"如何让LLM分析得准、出错时不毁信任"。<br/>
+  <b>分类器两段式</b>: 规则/小模型粗筛(便宜) + LLM精判(拿不准的)。分类是初始路由非死判决,非代码分支发现证据指向代码可回切。<br/>
+  <b>两阶段LLM</b>: 阶段1生成2-3个候选根因(发散), 阶段2强制回代码验证/否决(收敛)。全部否决则判低置信。对冲单轮"瞎猜"。<br/>
+  <b>非代码也查代码</b>: 缺文件必须查路径引用确认外部还是内置; 配置变更查读取点; 依赖故障查有无重试熔断。这是相对"只看代码"工具的差异化。<br/>
+  <b>检索非单一RAG</b>: grep精确(主力) + codegraph结构(关键-根因在调用链/数据流里)是核心; 向量语义(补充)和历史案例RAG(对照)是<b>可选</b>, 无向量库也能运行。agent自主多轮迭代检索,类似Copilot范式。<br/>
+  <b>置信度分流保护信任</b>: 高置信自动定责+带方案; 中置信辅助triage给候选; 低置信仅通知标注AI未定位。宁可不说也不乱说——错误根因比没有根因更伤信任。先辅助姿态上线,攒准率再放开自动。<br/>
+  <b>知识库全程辅助</b>: 历史incident+修复+反馈回灌。方案被采纳是强信号,系统越用越准。<br/>
+  <b>版本对齐</b>: stack frame行号对应出错时release的commit版本,非main当前版本,否则行号对不上。
+</div>
+</div>
+
+<!-- ==================== 部署架构 ==================== -->
+<div id="deploy" class="panel">
+<div class="mermaid-host" id="host-deploy"></div>
+<script type="text/mermaid" id="src-deploy">
+flowchart TB
+  classDef ext fill:#1f2937,stroke:#374151,color:#d1d5db
+  classDef svc fill:#0c2d6b,stroke:#1f6feb,color:#bfdbfe
+  classDef mq fill:#1a3a4a,stroke:#2f81f7,color:#a5d6ff
+  classDef store fill:#3b2f1d,stroke:#d29922,color:#fde68a
+  classDef llm fill:#4a1d1d,stroke:#f85149,color:#fecaca
+  classDef ha fill:#1d4a2e,stroke:#3fb950,color:#bbf7d0
+
+  subgraph EXT["外部系统"]
+    SRC["日志源<br/>ELK/Sentry/APM"]
+    SCM["代码仓库<br/>GitHub/ADO"]
+    LLMEXT["LLM API<br/>OpenAI/私有部署"]
+    MAILSVR["邮件/IM 网关"]
+  end
+
+  subgraph EDGE["接入层 - 可水平扩展"]
+    LB["负载均衡<br/>Nginx/ALB"]
+    API["API Gateway<br/>接收webhook/配置API"]
+    WSC["WebSocket Collector<br/>订阅日志流"]
+  end
+
+  subgraph INGSVC["采集降噪服务 - 无状态可扩展"]
+    ING1["Ingest Worker 1"]
+    ING2["Ingest Worker N"]
+  end
+
+  subgraph MQ["消息队列集群"]
+    KAFKA["Kafka<br/>异常事件队列<br/>分区按优先级"]
+    DLQ["Dead Letter Queue"]
+  end
+
+  subgraph RCASVC["根因分析服务 - 有状态"]
+    ORCH["编排器<br/>限流/去抖/降级"]
+    AGENT["LLM Agent<br/>两阶段分析+检索"]
+    RETRIEVER["代码检索服务<br/>grep/codegraph/向量"]
+  end
+
+  subgraph OWNSVC["定责通知服务 - 无状态"]
+    OWNER["Owner解析服务"]
+    NOTIFY["通知编排服务"]
+  end
+
+  subgraph STORE["持久化层"]
+    PG[("PostgreSQL<br/>事件/分析结果/配置")]
+    VEC[("向量库(可选)<br/>pgvector/Milvus<br/>历史案例RAG")]
+    REDIS[("Redis<br/>指纹缓存/限流/去重状态")]
+    CODEIDX[("代码索引<br/>tree-sitter AST/LSIF")]
+  end
+
+  subgraph MGMT["管理面"]
+    CONF["配置中心<br/>服务/repo/凭证/规则"]
+    UI["管理UI<br/>Dashboard/白名单/规则"]
+  end
+
+  SRC --> WSC
+  SCM --> RETRIEVER
+  LLMEXT --> AGENT
+  MAILSVR --> NOTIFY
+
+  LB --> API
+  WSC --> ING1
+  WSC --> ING2
+  API --> ING1
+  API --> ING2
+
+  ING1 --> KAFKA
+  ING2 --> KAFKA
+  KAFKA --> ORCH
+  ORCH --> AGENT
+  AGENT --> RETRIEVER
+  AGENT -.->|"失败"| DLQ
+  DLQ -.-> ORCH
+
+  ORCH --> OWNER
+  AGENT --> OWNER
+  OWNER --> NOTIFY
+
+  ING1 --> REDIS
+  ING2 --> REDIS
+  ORCH --> REDIS
+  AGENT --> PG
+  AGENT --> VEC
+  RETRIEVER --> CODEIDX
+  OWNER --> PG
+  NOTIFY --> PG
+
+  CONF -.-> ING1
+  CONF -.-> ORCH
+  CONF -.-> AGENT
+  CONF -.-> OWNER
+  UI --> CONF
+
+  class SRC,SCM,LLMEXT,MAILSVR ext
+  class LB,API,WSC,ING1,ING2,ORCH,AGENT,RETRIEVER,OWNER,NOTIFY svc
+  class KAFKA,DLQ mq
+  class PG,VEC,REDIS,CODEIDX store
+  class CONF,UI svc
+</script>
+<div class="legend">
+  <b>扩展性</b>: 采集降噪和通知服务无状态,按流量水平扩展。编排器和Agent有状态(限流/去抖),按分区扩展。Kafka分区按优先级隔离。<br/>
+  <b>关键依赖</b>: Redis(指纹缓存/限流/去重,必须高可用), Kafka(事件队列,持久化防丢), PostgreSQL(分析结果/配置,核心数据)。向量库<b>可选</b>, 无则grep+codegraph足够, 有则增强历史案例对照。<br/>
+  <b>代码索引</b>: tree-sitter AST/LSIF 建调用图+依赖图,按repo+commit版本索引,需定期重建。<br/>
+  <b>配置中心</b>: 服务/repo凭证/LLM endpoint/通知规则/白名单集中管理,热更新下发到各worker。<br/>
+  <b>管理UI</b>: Dashboard看分析历史/准确率/成本, 管理白名单/规则/owner映射, 配置通知策略。<br/>
+  <b>高可用</b>: 采集层和通知层多副本部署(通知不能断)。编排器单leader+备选(选主)。LLM不可用时降级为仅通知。
+</div>
+</div>
+
+<!-- ==================== 数据存储 ==================== -->
+<div id="storage" class="panel">
+<div class="mermaid-host" id="host-storage"></div>
+<script type="text/mermaid" id="src-storage">
+flowchart LR
+  classDef pg fill:#3b2f1d,stroke:#d29922,color:#fde68a
+  classDef vec fill:#1a3a4a,stroke:#2f81f7,color:#a5d6ff
+  classDef redis fill:#4a1d1d,stroke:#f85149,color:#fecaca
+  classDef idx fill:#1d4a2e,stroke:#3fb950,color:#bbf7d0
+  classDef mq fill:#3b1d4a,stroke:#a371f7,color:#e9d5ff
+
+  subgraph PG["PostgreSQL - 核心业务数据"]
+    T_EVENT["events<br/>异常事件(原始日志+指纹+状态)"]
+    T_RCA["rca_results<br/>分析结果(根因+方案+置信度)"]
+    T_OWNER["owner_mappings<br/>人名到平台身份映射"]
+    T_CONF["configs<br/>服务/repo/规则/白名单"]
+    T_FEED["feedbacks<br/>负责人反馈记录"]
+    T_REL["release_commits<br/>release到commit映射"]
+  end
+
+  subgraph VECDB["向量库 - RAG知识库 (可选)"]
+    V_HIST["历史incident向量(可选)<br/>异常描述+根因+修复方案"]
+    V_CODE["代码片段向量(可选)<br/>函数语义索引"]
+  end
+
+  subgraph REDISDB["Redis - 缓存与状态"]
+    R_FP["指纹缓存<br/>fingerprint到事件组映射"]
+    R_RATE["限流状态<br/>并发计数/token预算/去抖窗口"]
+    R_DEDUP["去重状态<br/>近期已处理指纹集合"]
+    R_COOLDOWN["静默期状态<br/>fingerprint到过期时间"]
+  end
+
+  subgraph CODEIDX["代码索引存储"]
+    CI_AST["AST索引<br/>tree-sitter解析结果"]
+    CI_GRAPH["调用图/依赖图<br/>LSIF/Scip格式"]
+    CI_BLAME["blame缓存<br/>行号到作者映射"]
+  end
+
+  KAFKA["Kafka<br/>事件队列(短期持久化)"]
+
+  PG -.->|"分析时读"| T_RCA
+  VECDB -.->|"RAG检索"| V_HIST
+  REDISDB -.->|"高频读写"| R_FP
+  CODEIDX -.->|"检索时读"| CI_GRAPH
+
+  class T_EVENT,T_RCA,T_OWNER,T_CONF,T_FEED,T_REL pg
+  class V_HIST,V_CODE vec
+  class R_FP,R_RATE,R_DEDUP,R_COOLDOWN redis
+  class CI_AST,CI_GRAPH,CI_BLAME idx
+  class KAFKA mq
+</script>
+<div class="legend">
+  <b>PostgreSQL</b>: 核心业务数据。events存原始事件+指纹+处理状态(含可回放审计)。rca_results存分析结果供反馈和知识库。release_commits是版本对齐的关键——出错时查当前release对应的commit。<br/>
+  <b>向量库(可选)</b>: 整个向量库是可选组件。pgvector(轻量,复用PG) 或 Milvus(大规模)。存历史incident的异常描述+根因+修复方案,用于RAG检索"上次类似的错怎么修的"。无向量库时系统仍可运行(grep+codegraph足够定位根因), 只是缺少历史案例对照能力, 准确率略低但冷启动更简单。<br/>
+  <b>Redis</b>: 高频读写状态。指纹缓存避免重复计算,限流/去抖/静默期状态都是短时TTL数据。必须高可用(挂了限流失效可能打爆LLM)。<br/>
+  <b>代码索引</b>: tree-sitter AST + LSIF/Scip调用图,按repo+commit版本索引。blame结果缓存(避免每次查git)。大repo索引重建耗时,需增量更新机制。<br/>
+  <b>Kafka</b>: 事件队列短期持久化(默认7天),服务重启不丢待分析事件。分区按优先级(P0/P1/P2分partition)。<br/>
+  <b>数据生命周期</b>: events保留90天(审计), rca_results永久(知识库), 向量库随反馈增长, Redis短TTL, 代码索引随commit增量更新。
+</div>
+</div>
+
+<!-- ==================== 安全与脱敏 ==================== -->
+<div id="security" class="panel">
+<div class="mermaid-host" id="host-security"></div>
+<script type="text/mermaid" id="src-security">
+flowchart TB
+  classDef in fill:#0c2d6b,stroke:#1f6feb,color:#bfdbfe
+  classDef mask fill:#4a1d1d,stroke:#f85149,color:#fecaca
+  classDef sec fill:#1d4a2e,stroke:#3fb950,color:#bbf7d0
+  classDef store fill:#3b2f1d,stroke:#d29922,color:#fde68a
+  classDef out fill:#1d4a2e,stroke:#3fb950,color:#bbf7d0
+
+  subgraph INPUT["敏感数据来源"]
+    LOG["生产日志<br/>含PII/密钥/token/连接串"]
+    CODE["源代码<br/>含密钥/内部逻辑"]
+    STACK["stack trace<br/>含变量值/路径"]
+  end
+
+  subgraph MASK["脱敏层 - 送LLM前必经"]
+    DETECT["敏感数据检测<br/>正则+命名实体识别<br/>邮箱/手机/身份证/IP/密钥/token"]
+    REPLACE["脱敏替换<br/>保留类型信息, 替换值<br/>user@corp.com -> EMAIL_1<br/>sk-xxx -> API_KEY"]
+    LOGSAN["日志净化<br/>去掉凭证/内部URL<br/>保留stack和message结构"]
+  end
+
+  subgraph VAULT["凭证管理"]
+    SECRETS["Secret Store<br/>Vault/KMS<br/>GitHub App token/ADO PAT/LLM API key"]
+    ROTATE["自动轮换<br/>token定期过期更新"]
+    AUDIT["访问审计<br/>谁在何时取了什么凭证"]
+  end
+
+  subgraph ISOLATE["隔离与权限"]
+    TENANT["租户隔离<br/>按team/org隔离数据<br/>跨租户不可见"]
+    RBAC["RBAC权限<br/>查看分析结果需授权<br/>配置规则需admin"]
+    NET["网络隔离<br/>LLM调用走私有网络<br/>或私有部署模型"]
+  end
+
+  subgraph COMPLIANCE["合规"]
+    OPTIN["LLM数据使用开关<br/>敏感repo可关闭代码送LLM<br/>降级为仅通知"]
+    RETENTION["数据保留策略<br/>日志脱敏后保留, 原始按合规销毁"]
+    TRACE["操作追溯<br/>每次LLM调用记录输入输出hash"]
+  end
+
+  LLMOUT["送LLM分析(已脱敏)"]
+  STOREOUT["存储(按策略)"]
+
+  LOG --> DETECT
+  CODE --> DETECT
+  STACK --> DETECT
+  DETECT --> REPLACE
+  REPLACE --> LOGSAN
+  LOGSAN --> LLMOUT
+  LOGSAN --> STOREOUT
+
+  SECRETS --> ROTATE
+  SECRETS --> AUDIT
+  ROTATE -.-> SECRETS
+
+  TENANT --> RBAC
+  RBAC --> NET
+
+  OPTIN --> LLMOUT
+  RETENTION --> STOREOUT
+  TRACE -.-> LLMOUT
+
+  class LOG,CODE,STACK in
+  class DETECT,REPLACE,LOGSAN mask
+  class SECRETS,ROTATE,AUDIT,TENANT,RBAC,NET sec
+  class OPTIN,RETENTION,TRACE store
+  class LLMOUT,STOREOUT out
+</script>
+<div class="legend">
+  <b>脱敏必经</b>: 生产日志含PII/密钥/token, 送LLM前必须脱敏。检测(正则+NER)识别敏感数据, 替换保留类型信息(EMAIL_1/API_KEY)便于LLM理解上下文但不泄露真实值。<br/>
+  <b>凭证管理</b>: GitHub App token/ADO PAT/LLM API key 存Vault/KMS, 自动轮换, 访问审计。绝不硬编码或存配置文件明文。<br/>
+  <b>租户隔离</b>: 按team/org隔离数据, 跨租户不可见。多团队共用一套Argus时, A团队看不到B团队的分析结果和代码。<br/>
+  <b>LLM数据使用开关</b>: 敏感repo可关闭"代码送LLM", 降级为仅通知(有异常+找人+日志, 无AI分析)。满足"代码不能送外部LLM"的合规要求。<br/>
+  <b>私有部署选项</b>: 支持私有部署LLM(vLLM/Ollama), 敏感场景数据不出内网。代价是模型能力可能弱于闭源模型, 准确率受影响。<br/>
+  <b>操作追溯</b>: 每次LLM调用记录输入输出hash(不存原文), 可审计"系统把什么送给了LLM"。
+</div>
+</div>
+
+<!-- ==================== 可观测性 ==================== -->
+<div id="observ" class="panel">
+<div class="mermaid-host" id="host-observ"></div>
+<script type="text/mermaid" id="src-observ">
+flowchart TB
+  classDef svc fill:#0c2d6b,stroke:#1f6feb,color:#bfdbfe
+  classDef metric fill:#1a3a4a,stroke:#2f81f7,color:#a5d6ff
+  classDef alert fill:#4a1d1d,stroke:#f85149,color:#fecaca
+  classDef dash fill:#1d4a2e,stroke:#3fb950,color:#bbf7d0
+
+  subgraph SERVICES["Argus各服务 - 自带埋点"]
+    ING["采集降噪"]
+    ORC["编排调度"]
+    AGT["LLM Agent"]
+    OWN["定责通知"]
+    RET["代码检索"]
+  end
+
+  subgraph METRICS["指标采集"]
+    M_INGEST["采集指标<br/>入量/各步压缩比/白名单命中率"]
+    M_COST["成本指标<br/>LLM调用数/token消耗/费用<br/>按服务/优先级统计"]
+    M_QUALITY["质量指标<br/>根因准确率(反馈算)<br/>方案采纳率/置信度分布"]
+    M_PERF["性能指标<br/>端到端延迟/各阶段耗时<br/>LLM响应时间/检索耗时"]
+    M_RELIA["可靠性指标<br/>LLM失败率/熔断次数<br/>通知送达率/DLQ堆积"]
+  end
+
+  subgraph LOGS["日志与追踪"]
+    TRACE["分布式追踪<br/>OpenTelemetry<br/>事件ID贯穿全链路"]
+    SLOG["结构化日志<br/>每个事件处理步骤可追溯"]
+  end
+
+  subgraph ALERTS["自监控告警"]
+    A_COST["成本告警<br/>日token超预算"]
+    A_RELIA["可靠性告警<br/>LLM失败率飙升/熔断触发<br/>通知送达失败/DLQ堆积超限"]
+    A_DELAY["延迟告警<br/>端到端处理超SLA<br/>事件队列积压"]
+    A_QUALITY["质量告警<br/>根因准确率持续下降<br/>反馈差评率上升"]
+  end
+
+  subgraph DASH2["Dashboard"]
+    D_OPS["运维大盘<br/>实时流量/成本/延迟/健康"]
+    D_QUALITY["质量大盘<br/>准确率趋势/采纳率/反馈分布"]
+    D_COST2["成本大盘<br/>token消耗趋势/按服务分解"]
+  end
+
+  ING --> M_INGEST
+  ORC --> M_COST
+  AGT --> M_COST
+  AGT --> M_QUALITY
+  ING --> M_PERF
+  ORC --> M_PERF
+  AGT --> M_PERF
+  RET --> M_PERF
+  ORC --> M_RELIA
+  AGT --> M_RELIA
+  OWN --> M_RELIA
+
+  ING --> TRACE
+  ORC --> TRACE
+  AGT --> TRACE
+  OWN --> TRACE
+  ING --> SLOG
+  AGT --> SLOG
+
+  M_COST --> A_COST
+  M_RELIA --> A_RELIA
+  M_PERF --> A_DELAY
+  M_QUALITY --> A_QUALITY
+
+  M_INGEST --> D_OPS
+  M_COST --> D_COST2
+  M_QUALITY --> D_QUALITY
+  M_PERF --> D_OPS
+  M_RELIA --> D_OPS
+
+  class ING,ORC,AGT,OWN,RET svc
+  class M_INGEST,M_COST,M_QUALITY,M_PERF,M_RELIA,TRACE,SLOG metric
+  class A_COST,A_RELIA,A_DELAY,A_QUALITY alert
+  class D_OPS,D_QUALITY,D_COST2 dash
+</script>
+<div class="legend">
+  <b>谁监控监控者</b>: Argus给开发者监控异常, 自身也需要被监控。每个服务自带埋点, 指标采集到Prometheus, 日志到ELK, 追踪用OpenTelemetry。<br/>
+  <b>四大指标维度</b>: 成本(token/费用, 防超预算), 质量(准确率/采纳率, 核心价值指标), 性能(延迟/耗时, 影响响应速度), 可靠性(失败率/熔断/送达率, 影响可用性)。<br/>
+  <b>质量指标靠反馈算</b>: 根因准确率=反馈"准确"/总反馈。采纳率=方案被采纳/给方案总数。这是系统核心KPI, 直接反映LLM分析价值。<br/>
+  <b>自监控告警</b>: 成本超预算/LLM失败率飙升/通知送达失败/准确率下降——这些Argus自身的异常也要告警给Argus运维, 不能盲区。<br/>
+  <b>事件ID贯穿全链路</b>: 一个异常从采集到通知, 用同一event_id串联所有日志和trace, 方便排查"这个事件为什么没通知"或"这次分析为什么不准"。<br/>
+  <b>Dashboard三视图</b>: 运维大盘(实时健康), 质量大病(准确率趋势, 决定是否放开自动定责), 成本大盘(费用分解, 优化限流策略)。
+</div>
+</div>
+
+<!-- ==================== LLM调用管理 ==================== -->
+<div id="llmmgmt" class="panel">
+<div class="mermaid-host" id="host-llmmgmt"></div>
+<script type="text/mermaid" id="src-llmmgmt">
+flowchart TB
+  classDef in fill:#0c2d6b,stroke:#1f6feb,color:#bfdbfe
+  classDef route fill:#3b1d4a,stroke:#a371f7,color:#e9d5ff
+  classDef llm fill:#4a1d1d,stroke:#f85149,color:#fecaca
+  classDef mgmt fill:#1d4a2e,stroke:#3fb950,color:#bbf7d0
+  classDef store fill:#3b2f1d,stroke:#d29922,color:#fde68a
+
+  REQ["分析请求<br/>来自编排器"]
+
+  subgraph ROUTE["多模型路由"]
+    RTYPE{"任务类型?"}
+    CHEAP["便宜模型<br/>分类/粗筛<br/>GPT-4o-mini/Qwen-7B"]
+    STRONG["强模型<br/>根因分析/方案生成<br/>GPT-4o/Claude/DeepSeek"]
+    RETRYMOD["重试模型<br/>主模型失败时备选<br/>不同厂商避免同时挂"]
+  end
+
+  subgraph PROMPT["Prompt管理"]
+    PMGR["Prompt模板库<br/>版本化管理"]
+    PCTX["上下文组装<br/>按token预算裁剪"]
+    PVAR["变量注入<br/>异常/代码/历史案例"]
+  end
+
+  subgraph CTX["上下文窗口管理"]
+    MEASURE["token计数<br/>tiktoken精确计量"]
+    TRUNC["超限裁剪策略<br/>代码:保留stack帧附近<br/>历史:取top-K相似<br/>日志:保留异常前后N行"]
+    PRIOR["优先级保留<br/>stack frame大于调用链大于历史大于日志"]
+  end
+
+  subgraph CACHE["缓存层"]
+    CFP["指纹结果缓存<br/>同fingerprint+同代码版本<br/>直接复用上次分析"]
+    CSEM["语义缓存(可选)<br/>相似问题命中<br/>向量相似度阈值判断"]
+  end
+
+  subgraph BUDGET["预算与限流"]
+    BDGT["token预算<br/>日/小时上限<br/>按优先级分配"]
+    CONC["并发控制<br/>全局+按模型"]
+    FALLBACK{"预算耗尽?"}
+  end
+
+  RES["分析结果"]
+  DEGRADED["降级: 仅分类+通知"]
+
+  REQ --> RTYPE
+  RTYPE -->|"分类/粗筛"| CHEAP
+  RTYPE -->|"根因/方案"| STRONG
+  STRONG -.->|"失败"| RETRYMOD
+
+  PMGR --> PCTX
+  PCTX --> PVAR
+  PVAR --> MEASURE
+  MEASURE --> TRUNC
+  TRUNC --> PRIOR
+  PRIOR --> CHEAP
+  PRIOR --> STRONG
+
+  REQ --> CFP
+  CFP -.->|"命中"| RES
+  CFP -.->|"未命中"| CSEM
+  CSEM -.->|"命中"| RES
+  CSEM -.->|"未命中"| RTYPE
+
+  BDGT --> CONC
+  CONC --> CHEAP
+  CONC --> STRONG
+  CONC --> FALLBACK
+  FALLBACK -->|"是"| DEGRADED
+  FALLBACK -->|"否"| RES
+
+  class REQ,RES,DEGRADED in
+  class RTYPE,FALLBACK route
+  class CHEAP,STRONG,RETRYMOD llm
+  class PMGR,PCTX,PVAR,MEASURE,TRUNC,PRIOR mgmt
+  class CFP,CSEM,BDGT,CONC store
+</script>
+<div class="legend">
+  <b>多模型路由</b>: 便宜模型做分类/粗筛(频繁调用), 强模型做根因/方案(关键调用)。重试用不同厂商模型避免同时故障。降低成本同时保证关键质量。<br/>
+  <b>Prompt版本化管理</b>: prompt模板存仓库, 每次改动可回滚。A/B测试不同prompt对准确率影响。变量注入异常/代码/历史案例。<br/>
+  <b>上下文裁剪</b>: tiktoken精确计量token。超限时按优先级裁剪: stack frame必留, 调用链次之, 历史案例取top-K, 日志只留异常前后N行。避免粗暴截断丢关键信息。<br/>
+  <b>双层缓存</b>: 指纹缓存(同fingerprint+同代码版本直接复用), 语义缓存(向量相似度判断相似问题)。大幅降低重复分析成本。<br/>
+  <b>预算耗尽降级</b>: token预算用完时, 不拒绝请求而是降级——只做分类+通知, 不做深度根因分析。保证通知不断, 分析延后。<br/>
+  <b>冷启动</b>: 知识库空时无历史案例可RAG, 准确率较低。建议预填已知问题库+Runbook bootstrap, 或上线初期全部走辅助triage不自动定责。
+</div>
+</div>
+
+<!-- ==================== 接入流程 ==================== -->
+<div id="onboard" class="panel">
+<div class="mermaid-host" id="host-onboard"></div>
+<script type="text/mermaid" id="src-onboard">
+flowchart TB
+  classDef step fill:#0c2d6b,stroke:#1f6feb,color:#bfdbfe
+  classDef conf fill:#3b1d4a,stroke:#a371f7,color:#e9d5ff
+  classDef check fill:#1d4a2e,stroke:#3fb950,color:#bbf7d0
+  classDef done fill:#3b2f1d,stroke:#d29922,color:#fde68a
+
+  START["新团队接入 Argus"]
+
+  subgraph S1["第1步 注册服务"]
+    REG["在Argus管理UI注册服务<br/>服务名/repo URL/平台类型"]
+    PICKSRC["选择日志源<br/>ELK订阅/Sentry webhook/文件tail"]
+  end
+
+  subgraph S2["第2步 授权代码仓库"]
+    AUTHGH["GitHub: 安装Argus GitHub App<br/>授权repo读权限+webhook"]
+    AUTHADO["ADO: 创建Service Principal<br/>授权repo读权限"]
+    TESTREPO{"能拉取代码?"}
+  end
+
+  subgraph S3["第3步 配置Owner"]
+    CHKOWN{"有CODEOWNERS?"}
+    GENOWN["生成OWNER文件模板<br/>Argus扫描git历史建议owner"]
+    CONFOWN["确认/修正owner映射<br/>人名到邮箱到平台身份"]
+  end
+
+  subgraph S4["第4步 配置通知"]
+    MAILCONF["配置通知邮件组/个人"]
+    IMCONF["配置IM webhook(Slack/钉钉)"]
+    RULECONF["配置通知规则<br/>静默时段/频率上限/升级策略"]
+    LVLCONF["配置级别过滤阈值<br/>按服务/环境"]
+  end
+
+  subgraph S5["第5步 配置LLM策略"]
+    LLMCONF["选择LLM模型<br/>闭源/私有部署"]
+    OPTCONF["配置代码送LLM开关<br/>敏感repo可关闭"]
+    BUDGETCONF["配置token预算"]
+  end
+
+  subgraph S6["第6步 试运行"]
+    DRYRUN["Shadow模式<br/>只分析不通知, 看准确率"]
+    REVIEW["人工review分析结果<br/>调规则/调prompt/加白名单"]
+    GOCONF{"准确率达标?"}
+    GOLIVE["正式上线<br/>开启通知"]
+  end
+
+  START --> REG
+  REG --> PICKSRC
+  PICKSRC --> AUTHGH
+  PICKSRC --> AUTHADO
+  AUTHGH --> TESTREPO
+  AUTHADO --> TESTREPO
+  TESTREPO -->|"否"| AUTHGH
+  TESTREPO -->|"是"| CHKOWN
+
+  CHKOWN -->|"有"| CONFOWN
+  CHKOWN -->|"无"| GENOWN
+  GENOWN --> CONFOWN
+
+  CONFOWN --> MAILCONF
+  MAILCONF --> IMCONF
+  IMCONF --> RULECONF
+  RULECONF --> LVLCONF
+
+  LVLCONF --> LLMCONF
+  LLMCONF --> OPTCONF
+  OPTCONF --> BUDGETCONF
+  BUDGETCONF --> DRYRUN
+
+  DRYRUN --> REVIEW
+  REVIEW --> GOCONF
+  GOCONF -->|"否"| REVIEW
+  GOCONF -->|"是"| GOLIVE
+
+  class REG,PICKSRC,AUTHGH,AUTHADO,GENOWN,MAILCONF,IMCONF,RULECONF,LVLCONF,LLMCONF,OPTCONF,BUDGETCONF,DRYRUN,REVIEW step
+  class CHKOWN,TESTREPO,GOCONF check
+  class CONFOWN conf
+  class START,GOLIVE done
+</script>
+<div class="legend">
+  <b>六步接入</b>: 注册服务 到 授权仓库 到 配置Owner 到 配置通知 到 配置LLM策略 到 试运行上线。每步可回退修正。<br/>
+  <b>Owner自动生成</b>: 新团队没有CODEOWNERS时, Argus扫描git历史(谁提交最多)建议owner映射, 团队确认/修正。降低接入门槛。<br/>
+  <b>Shadow模式试运行</b>: 关键! 上线前先只分析不通知, 人工review准确率。达标后再开通知。避免上线即误报轰炸团队, 毁信任。<br/>
+  <b>代码送LLM开关</b>: 每个repo可单独配置是否允许代码送LLM。敏感repo关闭后降级为仅通知(有异常+找人+日志, 无AI分析)。<br/>
+  <b>级别过滤按服务配置</b>: 有些服务WARN就需关注, 有些FATAL才管。接入时按服务/环境设阈值, 不一刀切。<br/>
+  <b>冷启动建议</b>: 试运行期预填已知问题库+Runbook, 弥补知识库空时RAG无案例的劣势。上线初期全走辅助triage, 攒准率再放开自动。
+</div>
+</div>
+
+<script>
+  mermaid.initialize({ startOnLoad: false, theme: 'dark', flowchart: { curve: 'basis', useMaxWidth: false }, sequence: { showSequenceNumbers: false, useMaxWidth: false } });
+  var rendered = {};
+  function renderPanel(id) {
+    var scriptEl = document.getElementById('src-' + id);
+    var hostEl = document.getElementById('host-' + id);
+    if (!scriptEl || !hostEl) return;
+    var src = scriptEl.textContent;
+    var div = document.createElement('div');
+    div.className = 'mermaid';
+    div.textContent = src;
+    hostEl.innerHTML = '';
+    hostEl.appendChild(div);
+    mermaid.run({ nodes: [div] }).then(function(){
+      rendered[id] = true;
+    }).catch(function(e){
+      console.error('mermaid render failed for', id, e);
+      hostEl.innerHTML = '<div style="color:#f85149;padding:16px">Mermaid 渲染失败: ' + (e && e.message ? e.message : e) + '</div><pre style="color:#8b949e;font-size:11px;white-space:pre-wrap;overflow:auto">' + src.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</pre>';
+    });
+  }
+  function show(id) {
+    document.querySelectorAll('.panel').forEach(function(p){ p.classList.remove('active'); });
+    document.querySelectorAll('.tab').forEach(function(t){ t.classList.remove('active'); });
+    var panel = document.getElementById(id);
+    panel.classList.add('active');
+    event.target.classList.add('active');
+    if (!rendered[id]) {
+      renderPanel(id);
+    }
+  }
+  window.addEventListener('load', function() {
+    renderPanel('overview');
+  });
+</script>
+</body>
+</html>

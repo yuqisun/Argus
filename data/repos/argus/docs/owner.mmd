@@ -1,0 +1,53 @@
+flowchart TB
+  classDef lyr fill:#1d4a2e,stroke:#3fb950,color:#bbf7d0
+  classDef bld fill:#0c2d6b,stroke:#1f6feb,color:#bfdbfe
+  classDef ntf fill:#3b2f1d,stroke:#d29922,color:#fde68a
+
+  subgraph INP["定责输入"]
+    SF["stack frame - 文件:行号"]
+    REPO["repo 信息"]
+  end
+
+  subgraph LAD["Owner 解析分层 - 逐级 fallback"]
+    L1["1. CODEOWNERS - 按文件路径精确匹配"]
+    L2["2. OWNER 文件 - 目录级半结构化"]
+    L3["3. commit blame - 出错行最后修改者"]
+    L4["4. README/模块文档 - LLM 读取兜底"]
+    L1 -.->|"miss"| L2
+    L2 -.->|"miss"| L3
+    L3 -.->|"miss"| L4
+  end
+
+  subgraph BLD["通知内容构建"]
+    ROOT["根因摘要 - 出错位置+为什么错"]
+    PATCH["修改方案 - unified diff 草稿"]
+    EVID["证据链 - 日志片段+相关代码+相似历史"]
+    CNF["置信度+备选方向"]
+  end
+
+  subgraph SND["通知渠道"]
+    MAIL["邮件 - 主渠道,完整内容"]
+    IMN["IM/Slack/钉钉 - 摘要+深链"]
+  end
+
+  FEED["负责人反馈 - 根因对不对/方案能不能用"] -.->|"回灌"| KB["知识库"]
+
+  SF --> L1
+  REPO --> L1
+  L4 --> WHO["负责人+平台身份"]
+  WHO --> ROOT
+  WHO --> PATCH
+  WHO --> EVID
+  WHO --> CNF
+  ROOT --> MAIL
+  PATCH --> MAIL
+  EVID --> MAIL
+  CNF --> MAIL
+  ROOT --> IMN
+  CNF --> IMN
+  MAIL --> FEED
+  IMN --> FEED
+
+  class L1,L2,L3,L4,WHO lyr
+  class ROOT,PATCH,EVID,CNF bld
+  class MAIL,IMN,FEED,KB ntf

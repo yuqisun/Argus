@@ -1,0 +1,92 @@
+flowchart TB
+  classDef ext fill:#1f2937,stroke:#374151,color:#d1d5db
+  classDef ing fill:#0c2d6b,stroke:#1f6feb,color:#bfdbfe
+  classDef cor fill:#3b1d4a,stroke:#a371f7,color:#e9d5ff
+  classDef lmm fill:#4a1d1d,stroke:#f85149,color:#fecaca
+  classDef not fill:#1d4a2e,stroke:#3fb950,color:#bbf7d0
+  classDef st fill:#3b2f1d,stroke:#d29922,color:#fde68a
+
+  subgraph SRC["数据源 - 平台无关"]
+    ELK["ELK / Loki"]
+    SEN["Sentry / 错误上报"]
+    APM["APM / Traces"]
+    FL["日志文件 / Tail"]
+  end
+
+  subgraph INGEST["1. 采集与降噪层"]
+    COL["Collector - Filebeat/Fluentd/HTTP"]
+    FP["指纹聚合 Fingerprinting - 按 stack+message 归并"]
+    DED["去重 + 时间窗降噪"]
+    FILT["规则/小模型预过滤 - 只放行真异常"]
+  end
+
+  subgraph CORE["2. 调度与编排层"]
+    QUE["异常事件队列 - Kafka/RabbitMQ"]
+    ORCH["事件编排器 - 限流/优先级/去抖"]
+  end
+
+  subgraph RCA["3. LLM 根因分析层"]
+    CLS["根因类型分类器 - 代码bug/数据/配置/依赖/容量"]
+    CP["代码根因分支"]
+    NC["非代码根因分支"]
+    RET["Repo 代码检索 - 调用图+依赖图+语义索引"]
+    L1["LLM Agent - 两阶段:候选到验证"]
+    L2["LLM Agent - 非代码场景分析"]
+    FIX["修改方案生成 - unified diff 草稿"]
+    CNF["置信度评估"]
+  end
+
+  subgraph OWN["4. 定责与方案交付层"]
+    BLM["Owner 解析 - CODEOWNERS 到 OWNER 到 blame 到 README"]
+    MAP["人名到平台身份映射"]
+    PREV["方案预览/通知编排"]
+  end
+
+  subgraph OUT["5. 通知渠道"]
+    MAIL["邮件 - 根因+方案+diff"]
+    IM["IM/Slack/钉钉"]
+  end
+
+  subgraph KB["知识库"]
+    HIST["历史 incident + 修复 - RAG 向量库"]
+    RUN["Runbook / 已知问题"]
+  end
+
+  ELK --> COL
+  SEN --> COL
+  APM --> COL
+  FL --> COL
+  COL --> FP
+  FP --> DED
+  DED --> FILT
+  FILT -->|"异常事件"| QUE
+  QUE --> ORCH
+  ORCH --> CLS
+
+  CLS -->|"代码bug"| CP
+  CLS -->|"非代码"| NC
+  CP --> RET
+  RET --> L1
+  L1 --> FIX
+  NC --> L2
+  NC -.->|"交叉验证"| RET
+  HIST -.->|"RAG"| L1
+  HIST -.->|"RAG"| L2
+  RUN -.-> L2
+  FIX --> CNF
+  L2 --> CNF
+
+  CNF --> BLM
+  BLM --> MAP
+  MAP --> PREV
+  PREV --> MAIL
+  PREV --> IM
+
+  class ELK,SEN,APM,FL ext
+  class COL,FP,DED,FILT ing
+  class QUE,ORCH cor
+  class CLS,CP,NC,RET,FIX,CNF cor
+  class L1,L2 lmm
+  class BLM,MAP,PREV not
+  class MAIL,IM not
+  class HIST,RUN st

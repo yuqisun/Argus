@@ -1,0 +1,96 @@
+flowchart TB
+  classDef in fill:#0c2d6b,stroke:#1f6feb,color:#bfdbfe
+  classDef pri fill:#3b1d4a,stroke:#a371f7,color:#e9d5ff
+  classDef que fill:#1a3a4a,stroke:#2f81f7,color:#a5d6ff
+  classDef ctrl fill:#3b2f1d,stroke:#d29922,color:#fde68a
+  classDef deg fill:#4a1d1d,stroke:#f85149,color:#fecaca
+  classDef out fill:#1d4a2e,stroke:#3fb950,color:#bbf7d0
+  classDef err fill:#4a1d1d,stroke:#f85149,color:#fecaca
+
+  EVT["触发事件<br/>来自降噪层"]
+
+  subgraph P1["优先级计算"]
+    SCOPE["影响范围<br/>host数/服务数/核心链路"]
+    SEV["严重度<br/>FATAL>ERROR/5xx/请求失败"]
+    TREND["频率趋势<br/>count增速"]
+    BIZ["业务影响<br/>关键路径/高峰时段"]
+    FRESH["新鲜度<br/>新fingerprint优先"]
+    SCORE["加权打分<br/>P0/P1/P2/P3"]
+    SCOPE --> SCORE
+    SEV --> SCORE
+    TREND --> SCORE
+    BIZ --> SCORE
+    FRESH --> SCORE
+  end
+
+  subgraph Q["优先级分队列"]
+    Q0["P0 紧急<br/>核心链路+大范围+飙升"]
+    Q1["P1 高<br/>影响明显范围有限"]
+    Q2["P2 常规<br/>偶发/边界/非核心"]
+    Q3["P3 低<br/>已知模式/低频/低影响"]
+  end
+
+  DEB{"去抖 Debounce<br/>同源聚批?<br/>发布窗口/同服务短时多异常"}
+  SKIP{"P0?<br/>P0跳过去抖立即分析"}
+  RL["限流 Rate Limiting<br/>全局并发+QPS+token预算<br/>按优先级分配配额 P0占六成 P1三成 P2一成"]
+  DGR{"降级判定<br/>资源紧张?"}
+
+  subgraph DEG["降级阶梯"]
+    NORM["正常<br/>全量LLM两阶段+repo检索+方案生成"]
+    LITE["轻度降级<br/>P3走规则, P2单阶段"]
+    MID["中度降级<br/>P2/P3暂停, repo检索范围缩小"]
+    HEAVY["重度降级<br/>仅小模型分类+通知, 标注AI不可用"]
+    CIR["熔断<br/>LLM连续失败, 暂停调用, 全走重度降级"]
+    NORM --> LITE --> MID --> HEAVY --> CIR
+  end
+
+  ANALYZE["送下游 LLM 根因分析"]
+  NOTIFY["通知负责人(无AI分析)<br/>附日志+stack+找人"]
+
+  subgraph RT["重试与死信"]
+    RETRY{"可重试?<br/>超时/拉不到repo"}
+    BACK["指数退避重试<br/>最多N次"]
+    DLQ["死信队列 DLQ<br/>不可重试/格式错误<br/>人工介入"]
+    PART["部分成功<br/>根因有/方案失败 - 根因仍通知"]
+  end
+
+  EVT --> SCORE
+  SCORE --> Q0
+  SCORE --> Q1
+  SCORE --> Q2
+  SCORE --> Q3
+
+  Q0 --> SKIP
+  Q1 --> DEB
+  Q2 --> DEB
+  Q3 --> DEB
+  SKIP -->|"是,跳过"| RL
+  DEB -->|"聚批完成"| RL
+  DEB -.->|"P0升级突破去抖"| SKIP
+
+  RL --> DGR
+  DGR -->|"正常"| NORM
+  DGR -->|"轻度紧张"| LITE
+  DGR -->|"中度紧张"| MID
+  DGR -->|"重度紧张"| HEAVY
+  DGR -.->|"LLM连续失败"| CIR
+
+  NORM --> ANALYZE
+  LITE --> ANALYZE
+  MID --> ANALYZE
+  HEAVY --> NOTIFY
+  CIR --> NOTIFY
+
+  ANALYZE --> RETRY
+  RETRY -->|"是"| BACK
+  BACK --> ANALYZE
+  RETRY -->|"否"| DLQ
+  ANALYZE --> PART
+
+  class EVT in
+  class SCOPE,SEV,TREND,BIZ,FRESH,SCORE pri
+  class Q0,Q1,Q2,Q3 que
+  class DEB,SKIP,RL,DGR ctrl
+  class NORM,LITE,MID,HEAVY,CIR deg
+  class ANALYZE,NOTIFY out
+  class RETRY,BACK,DLQ,PART err

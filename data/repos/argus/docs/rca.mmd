@@ -1,0 +1,51 @@
+flowchart LR
+  classDef start fill:#0c2d6b,stroke:#1f6feb,color:#bfdbfe
+  classDef dec fill:#3b1d4a,stroke:#a371f7,color:#e9d5ff
+  classDef lmm fill:#4a1d1d,stroke:#f85149,color:#fecaca
+  classDef cod fill:#1d4a2e,stroke:#3fb950,color:#bbf7d0
+  classDef out fill:#3b2f1d,stroke:#d29922,color:#fde68a
+  classDef shared fill:#1a3a4a,stroke:#2f81f7,color:#a5d6ff
+
+  EVT["异常事件"] --> CLS{"根因类型分类器"}
+
+  CLS -->|"代码bug"| STK["提取 stack frame - 文件:行号"]
+  STK --> GRP["构建上下文 - 调用图+依赖图"]
+  GRP --> SEM["语义检索 - 相关函数/类"]
+  SEM --> CND["LLM 阶段1 - 生成候选根因"]
+  CND --> VRF["LLM 阶段2 - 用代码验证/否决"]
+  VRF --> DIF["生成修改方案 - unified diff"]
+  DIF --> SC1{"置信度达标?"}
+
+  CLS -->|"上游数据"| DTA["数据校验 - schema/范围/缺失"]
+  CLS -->|"配置变更"| CFG["配置 diff - 近期变更对比"]
+  CLS -->|"依赖故障"| DEP["依赖健康 - 下游服务状态"]
+  CLS -->|"缺文件/资源"| MIS["文件存在性+路径引用检查"]
+  CLS -->|"容量/流量"| CAP["指标基线 - 异常突增检测"]
+
+  DTA -.->|"交叉验证"| RCS
+  CFG -.->|"交叉验证"| RCS
+  DEP -.->|"交叉验证"| RCS
+  MIS -.->|"交叉验证"| RCS
+
+  RCS["共享 Repo 检索<br/>调用图+依赖图+语义索引<br/>路径引用+资源加载点+配置读取代码"]
+
+  DTA --> SC2{"置信度达标?"}
+  CFG --> SC2
+  DEP --> SC2
+  MIS --> SC2
+  CAP --> SC2
+
+  SC1 -->|"是"| AUTO["自动定责+带方案通知"]
+  SC1 -->|"否"| AST["辅助triage - 给候选+人选,人工判定"]
+  SC2 -->|"是"| AUTO
+  SC2 -->|"否"| AST
+
+  AUTO --> OUT["通知负责人"]
+  AST --> OUT
+
+  class EVT start
+  class CLS,SC1,SC2 dec
+  class CND,VRF,DIF lmm
+  class STK,GRP,SEM,DTA,CFG,DEP,MIS,CAP cod
+  class RCS shared
+  class AUTO,AST,OUT out
