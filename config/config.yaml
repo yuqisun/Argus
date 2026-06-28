@@ -1,0 +1,55 @@
+app:
+  name: argus
+  environment: dev
+
+llm:
+  base_url: https://api.deepseek.com
+  api_key: ${DEEPSEEK_API_KEY}
+  models:
+    cheap: deepseek-chat
+    strong: deepseek-chat
+  limits:
+    daily_token_budget: 10000000
+    max_concurrency: 5
+
+database:
+  url: ${DATABASE_URL:-postgresql+asyncpg://argus:argus_dev@localhost:5432/argus}
+
+redis:
+  url: ${REDIS_URL:-redis://localhost:6379/0}
+
+event_bus:
+  provider: redis
+  queues:
+    p0: argus:events:p0
+    p1: argus:events:p1
+    p2: argus:events:p2
+
+code_search:
+  provider: local
+  local:
+    repos_root: ./data/repos
+    languages: [python]
+
+notifiers:
+  - type: smtp
+    host: ${SMTP_HOST:-localhost}
+    port: ${SMTP_PORT:-1025}
+    username: ${SMTP_USER:-}
+    password: ${SMTP_PASS:-}
+    from_addr: argus@company.com
+
+log_sources:
+  - type: sentry_webhook
+    endpoint: /hooks/sentry
+
+owner_resolver:
+  provider: github
+  fallback_chain:
+    - codeowners
+    - blame
+
+fingerprinter:
+  stack_top_n: 5
+  cooldown_seconds: 3600
+  dedup_window_seconds: 300
