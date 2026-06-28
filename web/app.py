@@ -1,4 +1,17 @@
 """FastAPI application entry point with pipeline wiring."""
+import os
+from pathlib import Path
+
+# Load .env before anything else
+_dotenv_path = Path(__file__).resolve().parent.parent / ".env"
+if _dotenv_path.exists():
+    # Read .env manually (avoid python-dotenv import overhead when not needed)
+    for _line in _dotenv_path.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _key, _, _val = _line.partition("=")
+            os.environ.setdefault(_key.strip(), _val.strip().strip('"').strip("'"))
+
 from fastapi import FastAPI
 from web.routes.health import router as health_router
 from web.routes.hooks import router as hooks_router
