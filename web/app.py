@@ -13,6 +13,19 @@ def create_app(config: dict | None = None) -> FastAPI:
     )
     app.include_router(health_router, tags=["health"])
     app.include_router(hooks_router, tags=["hooks"])
+
+    @app.get("/")
+    async def root():
+        return {
+            "service": "Argus — Log Anomaly Intelligent Remediation",
+            "version": "0.1.0",
+            "endpoints": {
+                "health": "/health",
+                "docs": "/docs",
+                "sentry_webhook": "POST /hooks/sentry",
+            }
+        }
+
     return app
 
 
