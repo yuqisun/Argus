@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="font-family: -apple-system, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px;">
+  <div style="background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px;">
+    <h2 style="color: #58a6ff; margin-top: 0;">Argus 根因分析报告</h2>
+
+    <div style="background: #0d1117; border-radius: 6px; padding: 16px; margin: 12px 0;">
+      <h3 style="color: #f85149; margin: 0 0 8px;">根因摘要</h3>
+      <pre style="color: #c9d1d9; white-space: pre-wrap; margin: 0;">{{ root_cause | default("见下方分析") }}</pre>
+    </div>
+
+    <div style="background: #0d1117; border-radius: 6px; padding: 16px; margin: 12px 0;">
+      <h3 style="color: #3fb950; margin: 0 0 8px;">修改方案</h3>
+      {% if diff %}
+      {% include "diff_block.html" %}
+      {% else %}
+      <pre style="color: #c9d1d9; white-space: pre-wrap; margin: 0;">{{ fix_suggestion | default("请人工排查") }}</pre>
+      {% endif %}
+    </div>
+
+    <div style="background: #0d1117; border-radius: 6px; padding: 16px; margin: 12px 0;">
+      <h3 style="color: #d29922; margin: 0 0 8px;">证据链</h3>
+      <pre style="color: #c9d1d9; white-space: pre-wrap; font-size: 12px; margin: 0;">{{ evidence | default("无") }}</pre>
+    </div>
+
+    <p style="color: #8b949e; font-size: 12px; margin-top: 20px;">
+      置信度: <strong>{{ confidence }}</strong> | 事件ID: {{ event_id | default("N/A") }}
+    </p>
+  </div>
+</body>
+</html>
