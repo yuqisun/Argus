@@ -43,6 +43,9 @@ class Config(BaseModel):
     log_sources: list[dict[str, Any]] = Field(default_factory=list)
     owner_resolver: dict[str, Any] = Field(default_factory=dict)
     fingerprinter: dict[str, Any] = Field(default_factory=dict)
+    service_repos: dict[str, dict[str, str]] = Field(
+        default_factory=lambda: {"default": {"repo": "argus", "commit": "HEAD"}}
+    )
 
     @classmethod
     def from_yaml(cls, path: str | None = None) -> "Config":

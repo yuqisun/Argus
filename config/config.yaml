@@ -53,3 +53,11 @@ fingerprinter:
   stack_top_n: 5
   cooldown_seconds: 3600
   dedup_window_seconds: 300
+
+# service_name -> repo mapping for RCA + owner resolution
+# repo: local repo dir name under code_search.local.repos_root
+# commit: default branch or pinned commit (use "HEAD" for latest)
+service_repos:
+  default:
+    repo: argus
+    commit: HEAD

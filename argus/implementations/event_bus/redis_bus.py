@@ -1,5 +1,6 @@
 """Redis Streams event bus implementation."""
 from __future__ import annotations
+import asyncio
 import json
 from collections.abc import AsyncIterator
 import structlog
@@ -50,11 +51,26 @@ class RedisEventBus:
         logger.debug("Published to stream", stream=stream, msg_id=msg_id)
         return msg_id
 
-    async def consume(self, priority: str, block_ms: int = 5000) -> AsyncIterator[AnomalyEvent]:
+    async def consume(self, priority: str, block_ms: int = 5000, *, stop_event=None) -> AsyncIterator[AnomalyEvent]:
+        """Consume events from a priority stream.
+
+        Args:
+            priority: Stream priority (p0/p1/p2).
+            block_ms: Block duration for xread in milliseconds.
+            stop_event: Optional asyncio.Event to signal graceful shutdown.
+        """
         stream = self._stream_key(priority)
         last_id = "0"
         while True:
-            results = await self._redis.xread({stream: last_id}, count=1, block=block_ms)
+            if stop_event and stop_event.is_set():
+                logger.info("Consumer stopping", stream=stream)
+                return
+            try:
+                results = await self._redis.xread({stream: last_id}, count=1, block=block_ms)
+            except Exception:
+                logger.warning("Redis xread failed, retrying in 1s", stream=stream, exc_info=True)
+                await asyncio.sleep(1)
+                continue
             if not results:
                 continue
             for _stream_name, messages in results:

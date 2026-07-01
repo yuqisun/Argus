@@ -1,7 +1,7 @@
 """Local git repo code searcher using git grep + gitpython."""
 from __future__ import annotations
+import asyncio
 import re
-import subprocess
 from pathlib import Path
 import structlog
 from argus.interfaces.code_search import CodeHit, CallGraphNode
@@ -18,15 +18,20 @@ class LocalRepoCodeSearcher:
     def _repo_path(self, repo_name: str) -> Path:
         return self.repos_root / repo_name
 
-    def _run_git(self, repo_name: str, *args, check: bool = True) -> str:
+    async def _run_git(self, repo_name: str, *args: str, timeout: float = 10.0) -> str:
+        """Run git command asynchronously with timeout."""
         repo = self._repo_path(repo_name)
-        result = subprocess.run(
-            ["git", "-C", str(repo), *args],
-            capture_output=True, text=True, check=check,
-        )
-        if not check and result.returncode != 0:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "-C", str(repo), *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            return stdout.decode("utf-8", errors="replace")
+        except (asyncio.TimeoutError, FileNotFoundError, OSError):
+            logger.warning("git command failed", repo=repo_name, args=args[:3])
             return ""
-        return result.stdout
 
     async def grep(
         self, repo: str, pattern: str, *, commit: str, glob: str | None = None,
@@ -34,10 +39,7 @@ class LocalRepoCodeSearcher:
         args = ["grep", "-n", "-i", pattern, commit]
         if glob:
             args.extend(["--", glob])
-        try:
-            output = self._run_git(repo, *args, check=False)
-        except subprocess.CalledProcessError:
-            return []
+        output = await self._run_git(repo, *args)
 
         hits = []
         for line in output.strip().split('\n'):
@@ -105,15 +107,15 @@ class LocalRepoCodeSearcher:
         self, repo: str, file_path: str, line_number: int, *, commit: str,
     ) -> tuple[str, str]:
         try:
-            output = self._run_git(
+            output = await self._run_git(
                 repo, "blame", "-L", f"{line_number},{line_number}",
-                "--porcelain", commit, "--", file_path, check=False,
+                "--porcelain", commit, "--", file_path,
             )
             for line in output.strip().split('\n'):
                 if line.startswith('author-mail '):
                     email = line.split('<', 1)[1].rstrip('>')
                     return (email, commit)
-            output = self._run_git(repo, "log", "-1", "--format=%ae", commit)
+            output = await self._run_git(repo, "log", "-1", "--format=%ae", commit)
             return (output.strip(), commit)
-        except subprocess.CalledProcessError:
+        except Exception:
             return ("unknown", commit)

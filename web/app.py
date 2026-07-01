@@ -68,10 +68,20 @@ def _build_pipeline(config: dict):
         # EventBus (try Redis, fallback to in-memory stub)
         event_bus = _build_event_bus(config)
 
-        # Ingest pipeline
+        # Ingest pipeline — pass redis client for multi-worker dedup
+        redis_client = None
+        try:
+            import redis.asyncio as redis_mod
+            redis_cfg = config.get("redis", {})
+            url = redis_cfg.get("url", "redis://localhost:6379/0")
+            redis_client = redis_mod.Redis.from_url(url)
+        except Exception:
+            pass
+
         ingest = IngestService(
             fingerprinter=fingerprinter,
             event_bus=event_bus,
+            redis_client=redis_client,
         )
 
         # Try LLM
@@ -101,6 +111,7 @@ def _build_pipeline(config: dict):
             "rca": rca,
             "owner": owner,
             "notifiers": notifiers,
+            "service_repos": config.get("service_repos", {}),
         }
     except Exception:
         import structlog
@@ -111,6 +122,8 @@ def _build_pipeline(config: dict):
 
 def _build_event_bus(config: dict):
     """Try Redis, fallback to in-memory stub."""
+    import structlog
+    logger = structlog.get_logger("web")
     try:
         import redis.asyncio as redis
         redis_cfg = config.get("redis", {})
@@ -120,8 +133,7 @@ def _build_event_bus(config: dict):
         return RedisEventBus(redis_client=client)
     except Exception:
         # In-memory fallback
-        import structlog
-        structlog.get_logger("web").warning("Redis unavailable, using in-memory event bus")
+        logger.warning("Redis unavailable, using in-memory event bus")
 
         class InMemoryBus:
             def __init__(self):

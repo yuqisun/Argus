@@ -41,20 +41,23 @@ class FakeEventBus:
 
 
 class TestDedupState:
-    def test_first_event_should_publish(self):
+    @pytest.mark.asyncio
+    async def test_first_event_should_publish(self):
         state = DedupState(dedup_window=300, cooldown=3600)
-        assert state.should_publish("fp-1")
+        assert await state.should_publish("fp-1")
 
-    def test_duplicate_within_window_is_blocked(self):
+    @pytest.mark.asyncio
+    async def test_duplicate_within_window_is_blocked(self):
         state = DedupState(dedup_window=300, cooldown=3600)
-        state.record("fp-1")
-        assert not state.should_publish("fp-1")
+        await state.record("fp-1")
+        assert not await state.should_publish("fp-1")
 
-    def test_counts_increment(self):
+    @pytest.mark.asyncio
+    async def test_counts_increment(self):
         state = DedupState(dedup_window=300, cooldown=3600)
-        state.record("fp-1")
-        state.record("fp-1")
-        assert state.get_count("fp-1") == 2
+        await state.record("fp-1")
+        await state.record("fp-1")
+        assert await state.get_count("fp-1") == 2
 
 
 class TestIngestService:

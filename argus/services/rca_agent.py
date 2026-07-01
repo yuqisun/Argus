@@ -118,7 +118,7 @@ class RCAAgent:
         file_hints = self._extract_file_hints(event.stack_trace)
         code_hits: list[CodeHit] = []
         if file_hints:
-            exc_type = event.raw_message.split(':')[0] if ':' in event.raw_message else event.raw_message[:30]
+            exc_type = self._extract_exception_type(event.raw_message)
             hits = await self.searcher.grep(repo, exc_type, commit=commit)
             code_hits.extend(hits[:5])
 
@@ -145,7 +145,7 @@ class RCAAgent:
             max_tokens=1024, temperature=0.1,
         )
 
-        verified = "ALL_REFUTED" not in stage2_response
+        verified, verified_index = self._parse_verification(stage2_response)
         confidence = "high" if verified and code_hits else "medium" if verified else "low"
 
         diff = None
@@ -200,3 +200,34 @@ class RCAAgent:
             if match:
                 hints.append((match.group(1), int(match.group(2))))
         return hints
+
+    def _extract_exception_type(self, message: str) -> str:
+        """Extract exception type — consistent with fingerprinter logic."""
+        match = re.match(r'^(\w+(?:Error|Exception|Warning))', message)
+        if match:
+            return match.group(1)
+        return message.split(':')[0].strip() if ':' in message else message[:50]
+
+    def _parse_verification(self, response: str) -> tuple[bool, int | None]:
+        """Parse stage2 LLM response. Returns (verified, verified_candidate_index)."""
+        # Try JSON parse first
+        try:
+            # Extract JSON from response (may have surrounding text)
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group())
+                results = data.get("verification_results", [])
+                for r in results:
+                    if r.get("verdict", "").upper() == "VERIFIED":
+                        return (True, r.get("candidate_index"))
+                # No verified candidate
+                return (False, None)
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
+        # Fallback: string match
+        if "ALL_REFUTED" in response.upper():
+            return (False, None)
+        if "VERIFIED" in response.upper():
+            return (True, None)
+        return (False, None)

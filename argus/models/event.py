@@ -30,14 +30,14 @@ class AnomalyEvent:
     last_seen: str
 
     @classmethod
-    def create(cls, raw: RawEvent, fingerprint: str) -> "AnomalyEvent":
+    def create(cls, raw: RawEvent, fingerprint: str, priority: str = "P2") -> "AnomalyEvent":
         now = datetime.now(timezone.utc).isoformat()
         return cls(
             event_id=str(uuid.uuid4())[:8],
             fingerprint=fingerprint,
             raw_sample=raw,
             count=1,
-            priority="P2",
+            priority=priority,
             first_seen=now,
             last_seen=now,
         )

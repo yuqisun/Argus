@@ -24,6 +24,12 @@ class Feedback:
             raise ValueError(
                 f"Invalid feedback_type: {self.feedback_type}. Must be one of {FEEDBACK_TYPES}"
             )
+        # Validate event_id — allow alphanumeric + hyphens (UUID, Sentry ID, etc.)
+        import re
+        if not re.match(r'^[a-zA-Z0-9\-]{1,64}$', self.event_id):
+            raise ValueError(
+                f"Invalid event_id format: {self.event_id}. Expected alphanumeric/UUID string."
+            )
 
 
 class FeedbackService:

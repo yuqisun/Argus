@@ -1,6 +1,6 @@
 """GitHub owner resolver — CODEOWNERS → blame fallback."""
 from __future__ import annotations
-import subprocess
+import asyncio
 from pathlib import Path
 import structlog
 from argus.interfaces.owner_resolver import OwnerResult
@@ -17,13 +17,20 @@ class GitHubOwnerResolver:
     def _repo_path(self, repo_name: str) -> Path:
         return self.repos_root / repo_name
 
-    def _run_git(self, repo_name: str, *args) -> str:
+    async def _run_git(self, repo_name: str, *args: str, timeout: float = 10.0) -> str:
+        """Run git command asynchronously with timeout."""
         repo = self._repo_path(repo_name)
-        result = subprocess.run(
-            ["git", "-C", str(repo), *args],
-            capture_output=True, text=True,
-        )
-        return result.stdout
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "-C", str(repo), *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            return stdout.decode("utf-8", errors="replace")
+        except (asyncio.TimeoutError, FileNotFoundError, OSError):
+            logger.warning("git command failed", repo=repo_name, args=args[:3])
+            return ""
 
     async def resolve(
         self, repo: str, file_path: str, line_number: int, *, commit: str,
@@ -74,7 +81,7 @@ class GitHubOwnerResolver:
         self, repo: str, file_path: str, line_number: int, commit: str,
     ) -> tuple[str, str]:
         try:
-            output = self._run_git(
+            output = await self._run_git(
                 repo, "blame", "-L", f"{line_number},{line_number}",
                 "--porcelain", commit, "--", file_path,
             )
@@ -82,7 +89,7 @@ class GitHubOwnerResolver:
                 if line.startswith('author-mail '):
                     email = line.split('<', 1)[1].rstrip('>')
                     return (email, commit)
-            output = self._run_git(repo, "log", "-1", "--format=%ae", commit)
+            output = await self._run_git(repo, "log", "-1", "--format=%ae", commit)
             return (output.strip(), commit)
         except Exception:
             return ("unknown", commit)

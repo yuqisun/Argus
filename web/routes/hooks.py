@@ -7,6 +7,26 @@ logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 
+def _extract_repo_info(
+    body: dict, service_name: str, service_repos: dict,
+) -> tuple[str, str]:
+    """Resolve repo + commit from Sentry payload or service_repos config.
+
+    Priority: Sentry release tag → service_repos[service_name] → service_repos['default'].
+    """
+    # Try Sentry release tag (format: "service@version" or commit SHA)
+    release = body.get("release", "") or body.get("tags", {}).get("release", "")
+    if release and "@" in release:
+        # Format: "service@version" — use service mapping for repo, release as commit hint
+        pass  # fall through to config for repo, release is not a commit
+
+    # Config mapping by service name
+    mapping = service_repos.get(service_name) or service_repos.get("default") or {}
+    repo = mapping.get("repo", "argus")
+    commit = mapping.get("commit", "HEAD")
+    return (repo, commit)
+
+
 @router.post("/hooks/sentry", status_code=202)
 async def sentry_webhook(request: Request):
     """Receive Sentry webhook → full pipeline."""
@@ -25,12 +45,13 @@ async def sentry_webhook(request: Request):
                 f' in {frame.get("function", "?")}'
             )
 
+    service_name = body.get("tags", {}).get("server_name", "unknown")
     raw = RawEvent(
         source="sentry",
         timestamp=body.get("timestamp", ""),
         raw_message=body.get("message", "")
         or (str(values[0].get("value", "")) if values else ""),
-        service_name=body.get("tags", {}).get("server_name", "unknown"),
+        service_name=service_name,
         host=body.get("tags", {}).get("host", "unknown"),
         environment=body.get("tags", {}).get("environment", "unknown"),
         stack_trace="\n".join(stack_lines) if stack_lines else None,
@@ -59,9 +80,16 @@ async def sentry_webhook(request: Request):
         priority = pipeline["scorer"].evaluate(raw)
         result["priority"] = priority
 
-        # 3. Ingest (dedup + publish)
-        msg_id = await pipeline["ingest"].process(raw)
-        if msg_id is None:
+        # 3. Ingest (dedup + publish) — pass real priority
+        ingest_failed = False
+        try:
+            msg_id = await pipeline["ingest"].process(raw, priority=priority)
+        except Exception:
+            logger.warning("Ingest failed (event bus down?), continuing degraded", exc_info=True)
+            msg_id = None
+            ingest_failed = True
+
+        if msg_id is None and not ingest_failed:
             result["status"] = "deduped"
             result["note"] = "duplicate within window"
             logger.info("Sentry event deduped", **result)
@@ -69,11 +97,17 @@ async def sentry_webhook(request: Request):
 
         result["msg_id"] = msg_id
 
+        # Resolve repo + commit for RCA and owner
+        service_repos = pipeline.get("service_repos", {})
+        repo, commit = _extract_repo_info(body, service_name, service_repos)
+        result["repo"] = repo
+        result["commit"] = commit
+
         # 4. RCA (if LLM configured)
         rca = pipeline.get("rca")
         if rca:
             try:
-                rca_result = await rca.analyze(raw, repo="unknown", commit="unknown")
+                rca_result = await rca.analyze(raw, repo=repo, commit=commit)
                 result["root_cause"] = rca_result.root_cause_summary[:500]
                 result["confidence"] = rca_result.confidence
                 result["root_cause_type"] = rca_result.root_cause_type
@@ -86,20 +120,24 @@ async def sentry_webhook(request: Request):
             result["root_cause"] = "LLM not configured (set DEEPSEEK_API_KEY)"
 
         # 5. Owner resolution
+        owner_emails: list[str] = []
         owner = pipeline.get("owner")
         if owner and fp.top_frames:
             # Extract first frame info
             first_frame = fp.top_frames[0] if fp.top_frames else None
             if first_frame:
                 file_path = first_frame.split(":")[0] if ":" in first_frame else "unknown"
+                line_number = int(first_frame.split(":")[1]) if ":" in first_frame and first_frame.split(":")[1].isdigit() else 0
                 try:
                     owners = await owner.resolve(
-                        "unknown", file_path, 0, commit="unknown"
+                        repo, file_path, line_number, commit=commit,
                     )
                     result["owners"] = [
                         {"name": o.name, "email": o.email, "source": o.source}
                         for o in owners
                     ]
+                    # Collect emails for notification recipients
+                    owner_emails = [o.email for o in owners if o.email and o.email != "unknown"]
                 except Exception:
                     result["owners"] = []
 
@@ -111,7 +149,7 @@ async def sentry_webhook(request: Request):
                 subject=f"[Argus][{priority}] {raw.raw_message[:80]}",
                 body_html=f"<pre>{result.get('root_cause', '')}</pre>",
                 body_text=result.get("root_cause", ""),
-                recipients=[],
+                recipients=owner_emails,
                 priority=priority,
             )
             for n in notifiers:
